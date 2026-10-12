@@ -1,0 +1,41 @@
+{
+	"sight-plugin-docker": {
+		"description": "Sight Docker page: overview, container start/stop/restart and logs, image list and removal",
+		"read": {
+			"ubus": {
+				"docker": [
+					"df",
+					"info",
+					"version"
+				],
+				"docker.container": [
+					"inspect",
+					"list"
+				],
+				"docker.image": [
+					"list"
+				]
+			},
+			"file": {
+				"/usr/bin/docker logs --tail 200 --timestamps *": [
+					"exec"
+				]
+			},
+			"uci": [
+				"dockerd"
+			]
+		},
+		"write": {
+			"ubus": {
+				"docker.container": [
+					"restart",
+					"start",
+					"stop"
+				],
+				"docker.image": [
+					"remove"
+				]
+			}
+		}
+	}
+}

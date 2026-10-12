@@ -1,0 +1,28 @@
+{
+	"id": "ddns",
+	"title": "DDNS",
+	"description": "Keep domain names pointing at your changing public address.",
+	"icon": "dns",
+	"group": "applications",
+	"version": "1.0.0",
+	"package": "sight-app-ddns",
+	"changes": {
+		"ddns": {
+			"label": "DDNS",
+			"options": {
+				"enabled": "Enabled",
+				"service_name": "Provider",
+				"domain": "Domain",
+				"lookup_host": "Lookup host",
+				"use_ipv6": "IPv6",
+				"ip_source": "IP source",
+				"ip_network": "Network",
+				"interface": "Interface"
+			},
+			"types": [
+				"service",
+				"ddns"
+			]
+		}
+	}
+}

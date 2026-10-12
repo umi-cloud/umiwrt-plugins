@@ -1,0 +1,36 @@
+{
+	"sight-plugin-ddns": {
+		"description": "Sight DDNS page: entries, state, provider list, logs and on-demand updates",
+		"read": {
+			"ubus": {
+				"luci.ddns": [
+					"get_ddns_state",
+					"get_services_log",
+					"get_services_status"
+				]
+			},
+			"file": {
+				"/usr/lib/ddns/dynamic_dns_lucihelper.sh -S * -- start": [
+					"exec"
+				],
+				"/usr/lib/ddns/dynamic_dns_lucihelper.sh -S * -- stop": [
+					"exec"
+				],
+				"/usr/share/ddns/default": [
+					"list"
+				],
+				"/usr/share/ddns/default/*": [
+					"read"
+				]
+			},
+			"uci": [
+				"ddns"
+			]
+		},
+		"write": {
+			"uci": [
+				"ddns"
+			]
+		}
+	}
+}

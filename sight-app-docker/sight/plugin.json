@@ -1,0 +1,9 @@
+{
+	"id": "docker",
+	"title": "Docker",
+	"description": "See which containers are running, restart them and read their logs.",
+	"icon": "container",
+	"group": "applications",
+	"version": "1.0.0",
+	"package": "sight-app-docker"
+}

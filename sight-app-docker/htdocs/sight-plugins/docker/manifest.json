@@ -1,0 +1,16 @@
+{
+	"id": "docker",
+	"sdk": 1,
+	"version": "1.0.0+8e9696dc",
+	"path": "/docker",
+	"title": "Docker",
+	"description": "See which containers are running, restart them and read their logs.",
+	"icon": "container",
+	"group": "applications",
+	"package": "sight-app-docker",
+	"entry": "page.js",
+	"css": "page.css",
+	"locales": {
+		"zh": "zh.json"
+	}
+}
