@@ -30,7 +30,7 @@
 	"Dead": "已失效",
 	"Docker": "Docker",
 	"Docker %s": "Docker %s",
-	"Docker is not installed on this device. Install luci-app-dockerman to manage containers here.": "本设备未安装 Docker。安装 luci-app-dockerman 后可在此管理容器。",
+	"The Docker service is not available on this device. Reinstall sight-app-docker.": "本设备上的 Docker 服务不可用，请重新安装 sight-app-docker。",
 	"Docker is not running": "Docker 未运行",
 	"Image": "镜像",
 	"Images": "镜像",

@@ -118,7 +118,7 @@
 {#if data === undefined && !error}
 	<Feedback tone="loading" message={t('Loading…')} />
 {:else if data === null}
-	<Feedback tone="info" message={t('Docker is not installed on this device. Install luci-app-dockerman to manage containers here.')} />
+	<Feedback tone="info" message={t('The Docker service is not available on this device. Reinstall sight-app-docker.')} />
 {:else if data && !data.reachable}
 	<Card>
 		<StatusHero data-docker="down" icon="container" tone="muted" title={t('Docker is not running')} status={data.error || t('The Docker service cannot be reached.')}>

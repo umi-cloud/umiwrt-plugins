@@ -1,9 +1,9 @@
 /*
- * Docker（dockerman 的 rpcd 插件 docker / docker.container / docker.image）。
+ * Docker（插件自带的 rpcd 插件 docker / docker.container / docker.image，移植自 dockerman）。
  * 插件把 Docker API 的 HTTP 响应包成 { code, headers, body }：code ≥ 300 视为失败，body.message 为原因；
  * 守护进程连不上时 code 为 500。容器日志经 ubus 取不到（多路复用流含 NUL 字节，JSON 在此截断），
  * 改用 docker CLI 的 logs（固定参数，ACL 逐字声明）。rpcd 拒绝带 env 的 exec，CLI 只能连本机默认套接字；
- * dockerman 配置了其它主机（dockerd.globals.hosts）时不取日志，界面说明原因。
+ * dockerd 配置了其它主机（dockerd.globals.hosts）时不取日志，界面说明原因。
  * 启停等均为即时操作，操作后回读列表。
  */
 import { probe, notInstalled } from '@sight/sdk/lib';
@@ -71,7 +71,7 @@ export function createDocker(client, uci) {
 	return {
 		/**
 		 * @returns {Promise<null | { reachable: false, error: string } | { reachable: true, info, containers, images, disk }>}
-		 * null = 未安装 dockerman
+		 * null = 后端对象不存在（插件不完整）
 		 */
 		async load() {
 			const version = await probe(client, 'docker', 'version');

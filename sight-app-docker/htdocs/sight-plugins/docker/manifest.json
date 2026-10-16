@@ -1,7 +1,7 @@
 {
 	"id": "docker",
 	"sdk": 1,
-	"version": "1.0.1+4c4298aa",
+	"version": "1.1.0+813146a4",
 	"path": "/docker",
 	"title": "Docker",
 	"description": "See which containers are running, restart them and read their logs.",

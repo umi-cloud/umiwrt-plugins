@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * Docker 的 Sight 页面真实流程验收，需在装有 luci-app-dockerman、sight-ui 与本插件页的专用容器运行。
+ * Docker 的 Sight 页面真实流程验收，需在装有 dockerd、sight-ui 与本插件（含 docker.* 后端）的专用容器运行。
  *   1. rpcd 接口签名逐字比对
  *   2. ACL：页面所需权限只来自本包的 sight-plugin-docker 组，CLI 只放行固定参数的日志读取，删除/新建容器未授权
  *   3. 容器停止/启动/重启回读、详情与日志、使用中的镜像不可删除
@@ -17,10 +17,13 @@ const { createFlow } = await import(pathToFileURL(resolve(SIGHT_UI, 'scripts/lib
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const { check, section, sleep, sh, ubus, denied, contract, withAclUser, browser, finish } = await createFlow({ id: 'docker', outDir: join(ROOT, '.visual-out/flow') });
 
-/* 需可用的守护进程：容器内 dockerd 无法运行时，dockerd.globals.hosts 指向隔离的 DinD
-   （docker run -d --privileged --name sight-dind -e DOCKER_TLS_CERTDIR= docker:dind dockerd --host=tcp://0.0.0.0:2375，
-   并准备运行中的 sight-web 与已退出的 sight-job 两个容器）；没有时跳过页面流程，并在报告中注明 */
-const DIND = cmd => execFileSync('docker', ['exec', '-e', 'DOCKER_HOST=tcp://127.0.0.1:2375', 'sight-dind', 'sh', '-c', cmd], { encoding: 'utf8' });
+/* 需可用的守护进程，二选一，都要准备运行中的 sight-web 与已退出的 sight-job（busybox:stable，日志含 job done）：
+   - DOCKER_LOCAL=1：专用容器内的 dockerd（与真机一致，容器需特权）；
+   - 否则 dockerd.globals.hosts 指向隔离的 DinD
+     （docker run -d --privileged --name sight-dind -e DOCKER_TLS_CERTDIR= docker:dind dockerd --host=tcp://0.0.0.0:2375）。
+   都没有时跳过页面流程，并在报告中注明 */
+const DIND = cmd => process.env.DOCKER_LOCAL === '1' ? sh(cmd)
+	: execFileSync('docker', ['exec', '-e', 'DOCKER_HOST=tcp://127.0.0.1:2375', 'sight-dind', 'sh', '-c', cmd], { encoding: 'utf8' });
 
 section('接口签名');
 contract('docker', { version: {}, info: {}, df: {} });

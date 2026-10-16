@@ -6,7 +6,7 @@ UmiWrt 自维护的应用 feed。每个目录是一个 OpenWrt 包，连同它�
 |------|------|------------|
 | `sight-app-homeproxy/` | HomeProxy 后端（sing-box 客户端）与 Sight 页面，不含 LuCI 界面，不依赖 luci-base | [immortalwrt/homeproxy](https://github.com/immortalwrt/homeproxy) `master` `98a6ad9` |
 | `sight-app-ddns/` | DDNS 的 Sight 页面、权限与状态接口 `sight.ddns`（移植自 luci-app-ddns，Apache-2.0）；服务由 `ddns-scripts` 提供 | 页面原创；`sight.ddns` 取自 luci-app-ddns |
-| `sight-app-docker/` | Docker 的 Sight 页面与权限；后端依赖 `luci-app-dockerman`（会带入 luci-base） | 无（本仓库原创） |
+| `sight-app-docker/` | Docker 的 Sight 页面、权限与引擎接口 `docker.*`（移植自 luci-app-dockerman 的 rpcd 后端，Apache-2.0）；引擎由 `dockerd` 提供，与 luci-app-dockerman 互斥 | 页面原创；`docker.*` 取自 luci-app-dockerman |
 
 ## 使用
 
