@@ -4,6 +4,6 @@
 	"description": "See which containers are running, restart them and read their logs.",
 	"icon": "container",
 	"group": "applications",
-	"version": "1.0.0",
+	"version": "1.0.1",
 	"package": "sight-app-docker"
 }

@@ -4,9 +4,9 @@ UmiWrt 自维护的应用 feed。每个目录是一个 OpenWrt 包，连同它�
 
 | 目录 | 内容 | 上游与基线 |
 |------|------|------------|
-| `sight-app-homeproxy/` | HomeProxy 后端（sing-box 客户端）与 Sight 页面，不含 LuCI 界面 | [immortalwrt/homeproxy](https://github.com/immortalwrt/homeproxy) `master` `98a6ad9` |
-| `sight-app-ddns/` | DDNS 的 Sight 页面与权限；后端依赖 `luci-app-ddns` | 无（本仓库原创） |
-| `sight-app-docker/` | Docker 的 Sight 页面与权限；后端依赖 `luci-app-dockerman` | 无（本仓库原创） |
+| `sight-app-homeproxy/` | HomeProxy 后端（sing-box 客户端）与 Sight 页面，不含 LuCI 界面，不依赖 luci-base | [immortalwrt/homeproxy](https://github.com/immortalwrt/homeproxy) `master` `98a6ad9` |
+| `sight-app-ddns/` | DDNS 的 Sight 页面、权限与状态接口 `sight.ddns`（移植自 luci-app-ddns，Apache-2.0）；服务由 `ddns-scripts` 提供 | 页面原创；`sight.ddns` 取自 luci-app-ddns |
+| `sight-app-docker/` | Docker 的 Sight 页面与权限；后端依赖 `luci-app-dockerman`（会带入 luci-base） | 无（本仓库原创） |
 
 ## 使用
 
@@ -72,4 +72,4 @@ git fetch homeproxy-upstream
 git merge -X subtree=sight-app-homeproxy homeproxy-upstream/master
 ```
 
-本仓库删掉了上游的 LuCI 界面（`htdocs/luci-static`、`menu.d`、`po/`）并重写了 `Makefile`，上游改到这些文件时合并会报冲突，保持删除、保留本仓库的 `Makefile` 即可。合并后更新上表的基线。
+本仓库删掉了上游的 LuCI 界面（`htdocs/luci-static`、`menu.d`、`po/`）并重写了 `Makefile`，上游改到这些文件时合并会报冲突，保持删除、保留本仓库的 `Makefile` 即可。`root/etc/homeproxy/scripts/homeproxy.uc` 自带 URL 编解码（取代 `luci.http`，`update_subscriptions.uc` 改从 `homeproxy` 导入），上游改到这两处的 import 时保留本仓库的写法。合并后更新上表的基线。

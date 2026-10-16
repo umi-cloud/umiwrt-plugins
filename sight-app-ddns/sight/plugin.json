@@ -4,7 +4,7 @@
 	"description": "Keep domain names pointing at your changing public address.",
 	"icon": "dns",
 	"group": "applications",
-	"version": "1.0.0",
+	"version": "1.1.0",
 	"package": "sight-app-ddns",
 	"changes": {
 		"ddns": {

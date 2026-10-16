@@ -1,7 +1,7 @@
 {
 	"id": "homeproxy",
 	"sdk": 1,
-	"version": "1.0.0+9bb6cae0",
+	"version": "1.1.0+bcc3700f",
 	"path": "/homeproxy",
 	"title": "HomeProxy",
 	"description": "Route traffic through your proxy nodes and choose what goes direct.",

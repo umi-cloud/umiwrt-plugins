@@ -5,7 +5,6 @@
  */
 
 import { mkstemp } from 'fs';
-import { urldecode_params } from 'luci.http';
 
 /* Global variables start */
 export const HP_DIR = '/etc/homeproxy';
@@ -13,6 +12,41 @@ export const RUN_DIR = '/var/run/homeproxy';
 /* Global variables end */
 
 /* Utilities start */
+/* URL 编解码：取代 luci.http（依赖 luci-base 与 lucihttp），行为与其一致：
+   不解码 '+'（除非 decode_plus），只编码非保留字符；参数按 '&' 分隔，不带 '=' 的记为空串 */
+export function urlencode(value) {
+	if (value == null)
+		return null;
+
+	return replace('' + value, /[^A-Za-z0-9_.~-]/g, (c) => sprintf('%%%02X', ord(c)));
+};
+
+export function urldecode(value, decode_plus) {
+	if (value == null)
+		return null;
+
+	value = '' + value;
+	if (decode_plus)
+		value = replace(value, '+', ' ');
+
+	return replace(value, /%([0-9A-Fa-f]{2})/g, (m, h) => chr(hex(h)));
+};
+
+export function urldecode_params(url, tbl) {
+	const params = tbl || {};
+	const m = match('' + (url || ''), /[^?]*$/);
+
+	for (let pair in split(m ? m[0] : '', '&')) {
+		const kv = split(pair, '=', 2);
+		const name = urldecode(kv[0]);
+
+		if (length(name))
+			params[name] = urldecode(kv[1]) || '';
+	}
+
+	return params;
+};
+
 /* Kanged from luci-app-commands */
 export function shellQuote(s) {
 	return `'${replace(s, "'", "'\\''")}'`;

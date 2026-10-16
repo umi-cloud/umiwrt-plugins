@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * DDNS 的 Sight 页面真实流程验收，需在装有 luci-app-ddns、sight-ui 与本插件页的专用容器运行。
+ * DDNS 的 Sight 页面真实流程验收，需在装有 ddns-scripts、sight-ui 与本插件（含 sight.ddns 后端）的专用容器运行。
  *   1. rpcd 接口签名逐字比对
  *   2. ACL：页面所需权限只来自本包的 sight-plugin-ddns 组，helper 参数被篡改即拒绝
  *   3. 新增条目、整体启停、立即更新、日志、删除
@@ -17,14 +17,14 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const { check, section, sleep, sh, ubus, denied, contract, withAclUser, browser, finish } = await createFlow({ id: 'ddns', outDir: join(ROOT, '.visual-out/flow') });
 
 section('接口签名');
-contract('luci.ddns', { get_services_log: { service_name: 'String' }, get_services_status: {}, get_ddns_state: {}, get_env: {} });
+contract('sight.ddns', { get_services_log: { service_name: 'String' }, get_services_status: {}, get_ddns_state: {}, get_env: {} });
 
 section('ACL：权限来自本包');
 await withAclUser(['sight-ui'], async sid => {
-	check(denied(await ubus(sid, 'luci.ddns', 'get_ddns_state')) && denied(await ubus(sid, 'uci', 'get', { config: 'ddns' })), '只有 sight-ui 组的账号不能访问 DDNS');
+	check(denied(await ubus(sid, 'sight.ddns', 'get_ddns_state')) && denied(await ubus(sid, 'uci', 'get', { config: 'ddns' })), '只有 sight-ui 组的账号不能访问 DDNS');
 });
 await withAclUser(['sight-ui', 'sight-plugin-ddns'], async sid => {
-	for (const [o, m, p] of [['luci.ddns', 'get_ddns_state', {}], ['luci.ddns', 'get_services_status', {}], ['file', 'list', { path: '/usr/share/ddns/default' }], ['uci', 'get', { config: 'ddns' }]])
+	for (const [o, m, p] of [['sight.ddns', 'get_ddns_state', {}], ['sight.ddns', 'get_services_status', {}], ['file', 'list', { path: '/usr/share/ddns/default' }], ['uci', 'get', { config: 'ddns' }]])
 		check((await ubus(sid, o, m, p))?.[0] === 0, `加上本包权限组后可调用 ${o}.${m}`);
 	const helper = params => ubus(sid, 'file', 'exec', { command: '/usr/lib/ddns/dynamic_dns_lucihelper.sh', params });
 	check((await helper(['-S', 'no_such_entry', '--', 'stop']))?.[0] === 0, 'helper 声明的参数放行');
@@ -56,7 +56,7 @@ try {
 		check(await page.evaluate(`document.querySelector('[data-ddns="${ddnsName}"]').dataset.state`) === 'paused', '自动更新关闭时卡片显示已暂停且不能立即更新');
 		await page.evaluate(`document.querySelector('[role=switch][aria-label="Automatic updates"]').click()`);
 		await waitFor(`/Automatic updates turned on/.test(document.querySelector('main').textContent)`, '开启自动更新');
-		check(sh(`ubus call luci.ddns get_ddns_state | grep -c '"_enabled": true' || true`).trim() === '1', '自动更新开启并回读');
+		check(sh(`ubus call sight.ddns get_ddns_state | grep -c '"_enabled": true' || true`).trim() === '1', '自动更新开启并回读');
 		await waitFor(`document.querySelector('[data-ddns="${ddnsName}"]')?.dataset.state !== 'paused'`, '回读后卡片解除暂停');
 		await clickText(`[data-ddns="${ddnsName}"] button`, 'Update now');
 		await waitFor(`/Update started for sight\.duckdns\.org|exit|failed/i.test(document.querySelector('main').textContent)`, '立即更新');

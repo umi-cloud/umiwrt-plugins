@@ -1,10 +1,19 @@
 /*
  * DDNS（ddns-scripts）：实例为 ddns 配置的 service 段，写入走会话暂存；
- * 状态、日志由 luci.ddns 读取；服务商取 /usr/share/ddns/default/*.json 的文件名。
+ * 状态、日志由插件自带的 sight.ddns 读取；服务商取 /usr/share/ddns/default/*.json 的文件名。
  * 即时操作：整体启停（init）、单实例立即更新/停止（lucihelper，参数与 ACL 逐字对应）。
  * 服务商二选一：service_name（预置）或 update_url（自定义），切换时删除另一项。
  */
-import { isHostname, probe, ignoreNotFound } from '@sight/sdk/lib';
+import { isHostname, probe, ignoreNotFound, notInstalled } from '@sight/sdk/lib';
+
+/* 启动项操作走宿主自带的 sight 对象；旧版宿主（sight-ui 0.4 之前）只有 LuCI 的 luci 对象 */
+async function initAction(client, name, action) {
+	try { return await client.call('sight', 'setInitAction', { name, action }); }
+	catch (e) {
+		if (!notInstalled(e)) throw e;
+		return client.call('luci', 'setInitAction', { name, action });
+	}
+}
 
 const HELPER = '/usr/lib/ddns/dynamic_dns_lucihelper.sh';
 
@@ -51,11 +60,11 @@ export function createDdns(client, uci) {
 		validate, plan,
 		/** @returns {Promise<null | object>} null = 未安装 */
 		async load() {
-			const state = await probe(client, 'luci.ddns', 'get_ddns_state');
+			const state = await probe(client, 'sight.ddns', 'get_ddns_state');
 			if (!state) return null;
 			const [cfg, status, dir, network] = await Promise.all([
 				uci.load('ddns'),
-				client.call('luci.ddns', 'get_services_status').catch(() => null),
+				client.call('sight.ddns', 'get_services_status').catch(() => null),
 				/* 服务商目录不存在视为没有预置服务商；其它读取失败单独标记，不当作空列表 */
 				client.call('file', 'list', { path: '/usr/share/ddns/default' }).catch(e => e?.status === 4 ? { entries: [] } : null),
 				uci.load('network').catch(() => ({})),
@@ -87,8 +96,8 @@ export function createDdns(client, uci) {
 		async setEnabled(id, on) { await uci.set('ddns', id, { enabled: on ? '1' : '0' }); },
 		/** 整体启停：开机自启与运行状态一并切换（与 LuCI 行为一致） */
 		async toggleService(on) {
-			await client.call('luci', 'setInitAction', { name: 'ddns', action: on ? 'enable' : 'disable' });
-			await client.call('luci', 'setInitAction', { name: 'ddns', action: on ? 'start' : 'stop' });
+			await initAction(client, 'ddns', on ? 'enable' : 'disable');
+			await initAction(client, 'ddns', on ? 'start' : 'stop');
 		},
 		/** 单实例立即更新 / 停止 */
 		async run(name, action) {
@@ -108,7 +117,7 @@ export function createDdns(client, uci) {
 			} catch { return { username: true, password: true, ipv6: true }; }
 		},
 		async log(name) {
-			const r = await client.call('luci.ddns', 'get_services_log', { service_name: name });
+			const r = await client.call('sight.ddns', 'get_services_log', { service_name: name });
 			const text = String(r?.result ?? '');
 			return text === 'File not found or empty' ? '' : text;
 		},

@@ -1,7 +1,7 @@
 {
 	"id": "ddns",
 	"sdk": 1,
-	"version": "1.0.0+5c668a8e",
+	"version": "1.1.0+10611c96",
 	"path": "/ddns",
 	"title": "DDNS",
 	"description": "Keep domain names pointing at your changing public address.",

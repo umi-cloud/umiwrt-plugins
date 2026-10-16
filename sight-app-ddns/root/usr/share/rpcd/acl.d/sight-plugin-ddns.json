@@ -3,7 +3,7 @@
 		"description": "Sight DDNS page: entries, state, provider list, logs and on-demand updates",
 		"read": {
 			"ubus": {
-				"luci.ddns": [
+				"sight.ddns": [
 					"get_ddns_state",
 					"get_services_log",
 					"get_services_status"

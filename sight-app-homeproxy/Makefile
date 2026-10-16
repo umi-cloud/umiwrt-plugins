@@ -7,7 +7,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=sight-app-homeproxy
-PKG_VERSION:=1.0.0
+PKG_VERSION:=1.1.0
 PKG_RELEASE:=1
 
 PKG_LICENSE:=GPL-2.0-only
@@ -26,7 +26,11 @@ define Package/sight-app-homeproxy
 	+firewall4 \
 	+kmod-nft-tproxy \
 	+ucode-mod-digest \
-	+luci-base \
+	+rpcd-mod-ucode \
+	+ucode-mod-fs \
+	+ucode-mod-math \
+	+ucode-mod-ubus \
+	+ucode-mod-uci \
 	+sight-ui
   PROVIDES:=luci-app-homeproxy
   CONFLICTS:=luci-app-homeproxy

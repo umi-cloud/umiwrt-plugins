@@ -6,7 +6,16 @@
  * dockerman 配置了其它主机（dockerd.globals.hosts）时不取日志，界面说明原因。
  * 启停等均为即时操作，操作后回读列表。
  */
-import { probe } from '@sight/sdk/lib';
+import { probe, notInstalled } from '@sight/sdk/lib';
+
+/* 启动项操作走宿主自带的 sight 对象；旧版宿主（sight-ui 0.4 之前）只有 LuCI 的 luci 对象 */
+async function initAction(client, name, action) {
+	try { return await client.call('sight', 'setInitAction', { name, action }); }
+	catch (e) {
+		if (!notInstalled(e)) throw e;
+		return client.call('luci', 'setInitAction', { name, action });
+	}
+}
 
 export const ACTIONS = ['start', 'stop', 'restart'];
 const LOG_LINES = '200';
@@ -98,6 +107,6 @@ export function createDocker(client, uci) {
 			return { ok: (r.code ?? 0) === 0, text: lines.join('\n') };
 		},
 		/** 守护进程未运行时通过启动项启动 dockerd */
-		async startService() { await client.call('luci', 'setInitAction', { name: 'dockerd', action: 'start' }); },
+		async startService() { await initAction(client, 'dockerd', 'start'); },
 	};
 }

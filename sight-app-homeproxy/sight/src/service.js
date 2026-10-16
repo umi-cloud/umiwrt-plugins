@@ -6,7 +6,16 @@
  * 关闭代理即 main_node = 'nil'（后端约定的「禁用」）；自定义分流模式下主节点不生效。
  * 设备访问控制只管按 MAC 的名单（lan_proxy_mac_addrs / lan_direct_mac_addrs），按 IP 的名单原样保留。
  */
-import { probe, readFile, isIPv4, isIPv6, isHostname, isMac, toList as list, ignoreNotFound } from '@sight/sdk/lib';
+import { probe, readFile, isIPv4, isIPv6, isHostname, isMac, toList as list, ignoreNotFound, notInstalled } from '@sight/sdk/lib';
+
+/* 启动项操作走宿主自带的 sight 对象；旧版宿主（sight-ui 0.4 之前）只有 LuCI 的 luci 对象 */
+async function initAction(client, name, action) {
+	try { return await client.call('sight', 'setInitAction', { name, action }); }
+	catch (e) {
+		if (!notInstalled(e)) throw e;
+		return client.call('luci', 'setInitAction', { name, action });
+	}
+}
 import { parseShareLink } from './sharelink.js';
 
 export const MODES = ['bypass_mainland_china', 'gfwlist', 'proxy_mainland_china', 'global'];
@@ -209,7 +218,7 @@ export function createHomeProxy(client, uci) {
 				const r = await client.call('luci.homeproxy', 'acllist_write', { type, content: next.join('\n') });
 				if (r?.result === false) throw new Error(r.error || 'Request failed');
 			}
-			if (enabled) await client.call('luci', 'setInitAction', { name: 'homeproxy', action: 'reload' });
+			if (enabled) await initAction(client, 'homeproxy', 'reload');
 		},
 		/**
 		 * 到节点服务器的线路延迟：路由器直接 ping 服务器地址（不经代理），只反映线路远近，不代表代理速度。

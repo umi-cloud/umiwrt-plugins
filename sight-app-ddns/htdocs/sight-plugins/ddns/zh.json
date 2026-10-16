@@ -14,7 +14,7 @@
 	"Choose a provider": "请选择服务商",
 	"Custom update URL": "自定义更新 URL",
 	"DDNS entry": "DDNS 条目",
-	"DDNS is not installed on this device. Install luci-app-ddns to manage it here.": "本设备未安装 DDNS。安装 luci-app-ddns 后可在此管理。",
+	"The DDNS service is not available on this device. Reinstall sight-app-ddns.": "本设备上的 DDNS 服务不可用，请重新安装 sight-app-ddns。",
 	"Enter an update URL starting with http:// or https://": "请输入以 http:// 或 https:// 开头的更新 URL",
 	"Host name used to check the current record; defaults to the domain": "用于查询当前记录的主机名，默认与域名相同",
 	"Invalid domain": "域名无效",

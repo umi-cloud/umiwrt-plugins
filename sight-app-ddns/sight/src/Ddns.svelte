@@ -145,7 +145,7 @@
 {#if data === undefined && !error}
 	<Feedback tone="loading" message={t('Loading…')} />
 {:else if data === null}
-	<Feedback tone="info" message={t('DDNS is not installed on this device. Install luci-app-ddns to manage it here.')} />
+	<Feedback tone="info" message={t('The DDNS service is not available on this device. Reinstall sight-app-ddns.')} />
 {:else if data}
 	<div class="stack">
 		<Card icon="dns">
