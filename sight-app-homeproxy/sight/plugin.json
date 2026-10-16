@@ -4,9 +4,40 @@
 	"description": "Route traffic through your proxy nodes and choose what goes direct.",
 	"icon": "proxy",
 	"group": "applications",
-	"version": "1.1.0",
+	"version": "1.2.0",
 	"package": "sight-app-homeproxy",
 	"changes": {
-		"homeproxy": { "label": "HomeProxy", "options": { "main_node": "Main node", "routing_mode": "Routing mode" }, "types": ["homeproxy", "node"] }
+		"homeproxy": {
+			"label": "HomeProxy",
+			"options": {
+				"main_node": "Main node",
+				"routing_mode": "Routing mode",
+				"label": "Name",
+				"type": "Type",
+				"address": "Server address",
+				"port": "Port",
+				"enabled": "Enabled",
+				"node": "Node",
+				"outbound": "Outbound",
+				"action": "Action",
+				"server": "Server",
+				"rule_set": "Rule sets",
+				"domain_suffix": "Domains",
+				"domain_keyword": "Domain keywords",
+				"default_outbound": "Default outbound",
+				"default_server": "Default DNS server",
+				"filter_nodes": "Filter nodes",
+				"filter_keywords": "Filter keywords"
+			},
+			"types": [
+				"homeproxy",
+				"node",
+				"routing_node",
+				"routing_rule",
+				"ruleset",
+				"dns_server",
+				"dns_rule"
+			]
+		}
 	}
 }

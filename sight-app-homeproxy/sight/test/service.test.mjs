@@ -122,3 +122,39 @@ test('延迟：解析 ping 平均值；全丢包为超时；IPv6 地址不支持
 	assert.equal(await svc.latency({ address: '192.0.2.1' }), 'timeout');
 	assert.equal(await svc.latency({ address: '2001:db8::1' }), 'unsupported');
 });
+
+test('新建段用具名段：前缀加随机串并避开已有名字；导入的多个节点各自取名', async () => {
+	const { sectionName } = await import('../src/service.js');
+	const seq = [1, 1, 0xabc];
+	assert.equal(sectionName('rule', ['rule_00000001'], () => seq.shift()), 'rule_00000abc');
+	const calls = [];
+	const svc = createHomeProxy({}, { add: async (...a) => calls.push(a) });
+	await svc.importNodes([{ type: 'socks', label: 'a' }, { type: 'socks', label: 'b' }], { custom: { order: [] } });
+	assert.ok(calls.every(([c, type, name]) => c === 'homeproxy' && type === 'node' && /^node_[0-9a-f]{8}$/.test(name)) && calls[0][2] !== calls[1][2]);
+});
+
+test('离开自定义模式：代理开着取默认出站的节点，关着写 nil', async () => {
+	const { leaveCustomNode } = await import('../src/service.js');
+	const custom = { defaultOutbound: 'out1', outbounds: [{ id: 'out1', node: 'n2' }], rules: [], rulesets: [], dnsServers: [], dnsRules: [] };
+	const nodes = [{ id: 'n1' }, { id: 'n2' }];
+	assert.equal(leaveCustomNode({ enabled: true, custom, nodes, mainNode: 'n1' }), 'n2');
+	assert.equal(leaveCustomNode({ enabled: true, custom: { ...custom, defaultOutbound: 'direct-out' }, nodes, mainNode: 'n1' }), 'n1');
+	assert.equal(leaveCustomNode({ enabled: false, custom, nodes, mainNode: 'n1' }), 'nil');
+});
+
+test('自定义模式：切入时按模板建段并保持开关状态；开关写默认出站并记住上次的去向', async () => {
+	const { shape } = await import('../src/service.js');
+	const calls = [];
+	const uci = { add: async (...a) => calls.push(['add', ...a]), set: async (...a) => calls.push(['set', ...a]), remove: async (...a) => calls.push(['remove', ...a]) };
+	const svc = createHomeProxy({}, uci);
+	const data = shape({ config: { '.name': 'config', main_node: 'n1', routing_mode: 'global', dns_server: '8.8.8.8' }, n1: { '.type': 'node', '.name': 'n1', type: 'socks' } }, {});
+	await svc.enterCustom(data, 'global', s => s);
+	assert.deepEqual(calls.filter(c => c[0] === 'add').map(c => [c[2], c[3]]), [['routing_node', 'sight_proxy'], ['dns_server', 'sight_dns_remote'], ['routing_rule', 'sight_private']]);
+	assert.deepEqual(calls.slice(-3).map(c => [c[2], c[3]]), [['routing', { default_outbound_dns: 'default-dns', default_outbound: 'sight_proxy' }], ['dns', { default_server: 'sight_dns_remote' }], ['config', { routing_mode: 'custom' }]]);
+	calls.length = 0;
+	const custom = shape({ routing: { '.name': 'routing', default_outbound: 'sight_proxy' }, sight_proxy: { '.type': 'routing_node', '.name': 'sight_proxy', enabled: '1', node: 'n1' } }, {}).custom;
+	await svc.setCustomPower(false, custom);
+	await svc.setCustomPower(true, { ...custom, defaultOutbound: 'nil', lastOutbound: 'direct-out' });
+	await svc.setCustomPower(true, { ...custom, defaultOutbound: 'nil', lastOutbound: 'gone' });
+	assert.deepEqual(calls.map(c => c[3]), [{ default_outbound: 'nil', sight_last_outbound: 'sight_proxy' }, { default_outbound: 'direct-out' }, { default_outbound: 'sight_proxy' }]);
+});

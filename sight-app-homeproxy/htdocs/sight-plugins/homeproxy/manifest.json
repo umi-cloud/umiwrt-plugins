@@ -1,7 +1,7 @@
 {
 	"id": "homeproxy",
 	"sdk": 1,
-	"version": "1.1.0+bcc3700f",
+	"version": "1.2.0+e6793cc9",
 	"path": "/homeproxy",
 	"title": "HomeProxy",
 	"description": "Route traffic through your proxy nodes and choose what goes direct.",
@@ -18,11 +18,32 @@
 			"label": "HomeProxy",
 			"options": {
 				"main_node": "Main node",
-				"routing_mode": "Routing mode"
+				"routing_mode": "Routing mode",
+				"label": "Name",
+				"type": "Type",
+				"address": "Server address",
+				"port": "Port",
+				"enabled": "Enabled",
+				"node": "Node",
+				"outbound": "Outbound",
+				"action": "Action",
+				"server": "Server",
+				"rule_set": "Rule sets",
+				"domain_suffix": "Domains",
+				"domain_keyword": "Domain keywords",
+				"default_outbound": "Default outbound",
+				"default_server": "Default DNS server",
+				"filter_nodes": "Filter nodes",
+				"filter_keywords": "Filter keywords"
 			},
 			"types": [
 				"homeproxy",
-				"node"
+				"node",
+				"routing_node",
+				"routing_rule",
+				"ruleset",
+				"dns_server",
+				"dns_rule"
 			]
 		}
 	}

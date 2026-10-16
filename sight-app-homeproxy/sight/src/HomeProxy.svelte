@@ -2,8 +2,14 @@
 	import { onDestroy, tick } from 'svelte';
 	import { t, errorText, client, route, navigate, activity, useEditor, requestLeave, editing, uci, pending, saveFlow, createClients, isMac, Card, Switch, Button, Badge, StatusHero, Callout, LogView, Select, Input, Textarea, Checkbox, RadioGroup, SettingRow, DynamicList, Field, Tabs, Drawer, Dialog, FormActions, ErrorSummary, Feedback, Table, Toolbar } from '@sight/sdk';
 	import { createHomeProxy, MODES, LOGS, SITES, RESOURCES, ACCESS, DNS_PRESETS, CHINA_DNS_PRESETS, validateSubscriptions, validateRouting, previewLinks, missingResources, DOMAIN_LISTS, parseDomains, validateDomains } from './service.js';
+	import { nodeGroups, sourceOf, MANUAL, ORPHAN } from './subscription.js';
+	import { TEMPLATES, find, DIRECT, BLOCK } from './routing.js';
+	import NodeForm from './NodeForm.svelte';
+	import SubscriptionTools from './SubscriptionTools.svelte';
+	import CustomRouting from './CustomRouting.svelte';
 
 	/* 顶部状态卡（开关、当前节点、连通性）常驻；其余按任务分区：节点、分流与 DNS、设备、订阅与规则库、日志。
+	   节点编辑（NodeForm）、订阅归组与过滤（SubscriptionTools）、自定义分流（CustomRouting）各自成组件，这里只做接入。
 	   配置保存即生效（带失联回滚）；订阅/规则库更新、连通性检查、清空日志为即时操作。 */
 	const svc = createHomeProxy(client, uci);
 	const clientsSvc = createClients(client, uci);
@@ -21,7 +27,7 @@
 
 	/* 各分区的编辑草稿；load 后按配置重置 */
 	let subs = $state([]), subsDraft = $state(''), subsBaseline = $state('[]'), subsError = $state('');
-	let routing = $state(null), routingBaseline = $state(''), routingErrors = $state([]), routingSummary = $state();
+	let routing = $state(null), routingBaseline = $state(''), routingErrors = $state([]), routingSummary = $state(), template = $state('blank');
 	let access = $state(null), accessBaseline = $state('');
 	let importing = $state(null);   // { text } 打开导入抽屉时
 	let removing = $state(null);
@@ -44,6 +50,8 @@
 		subsBaseline = JSON.stringify(nextSubs);
 		const nextRouting = { mode: r.mode, udpNode: r.udpNode, dns: dnsChoice(r.dnsServer), dnsCustom: dnsChoice(r.dnsServer) === 'custom' ? r.dnsServer : '',
 			china: chinaChoice(r.chinaDnsServer), chinaCustom: chinaChoice(r.chinaDnsServer) === 'custom' ? r.chinaDnsServer : '' };
+		/* 切到自定义时的初始配置，按当前模式给出最接近的一种；只在选了自定义时有意义，不计入草稿 */
+		template = { bypass_mainland_china: 'bypass_china', gfwlist: 'bypass_china', global: 'global' }[r.mode] || 'blank';
 		if (!routingDirty || discarded) { routing = nextRouting; routingErrors = []; }
 		routingBaseline = JSON.stringify(nextRouting);
 		const nextAccess = { mode: r.access.mode, macs: r.access.mode === 'except_listed' ? [...r.access.directMacs] : [...r.access.proxyMacs] };
@@ -73,11 +81,13 @@
 	const modeLabel = m => ({ bypass_mainland_china: t('Proxy sites outside mainland China'), gfwlist: t('Proxy blocked sites only (GFWList)'), proxy_mainland_china: t('Proxy mainland China sites only'), global: t('Proxy everything'), custom: t('Custom routing') }[m] || m);
 	const current = $derived(data?.nodes.find(n => n.id === data.mainNode) || null);
 	const custom = $derived(data?.mode === 'custom');
+	const outboundName = o => o === DIRECT ? t('Direct') : o === BLOCK ? t('Block traffic') : find(data.custom, 'outbound', o)?.label || o;
 	const heroState = $derived(!data ? '' : !data.enabled ? 'off' : data.running === false ? 'warning' : 'on');
 	const heroText = $derived.by(() => {
 		if (!data) return '';
 		if (!data.enabled) return t('Off. All traffic goes out directly.');
 		if (data.running === false) return t('On, but sing-box is not running. Check the logs.');
+		if (custom) return t('On. Custom routing; unmatched traffic goes to %s.', outboundName(data.custom.defaultOutbound));
 		return t('On. Using %s.', current?.label || data.mainNode);
 	});
 	const tabs = $derived([
@@ -87,6 +97,8 @@
 		{ value: 'subscriptions', label: t('Subscriptions & rules') },
 		{ value: 'logs', label: t('Logs') },
 	]);
+	/* 抽屉为模态，页面顶部的错误被遮挡：抽屉里的写入失败经它说明 */
+	const drawerError = $derived(error || (notice?.tone === 'error' ? notice.text : ''));
 	async function changeSection(next) { await navigate(next === 'nodes' ? '/homeproxy' : `/homeproxy?tab=${next}`); }
 
 	/* 失败保留输入；成功后重载（草稿与新基线一致即视为已保存），可附成功提示 */
@@ -99,8 +111,9 @@
 			alive: () => alive,
 		});
 	}
-	/* 打开代理时沿用上次的主节点，没有则用第一个节点 */
+	/* 打开代理时沿用上次的主节点，没有则用第一个节点；自定义模式下开关对应默认出站 */
 	function toggle(on) {
+		if (custom) { const c = data.custom; write(() => svc.setCustomPower(on, c)); return; }
 		if (on && !data.nodes.length) return;
 		write(() => on ? svc.useNode(data.mainNode || data.nodes[0].id) : svc.turnOff());
 	}
@@ -130,15 +143,35 @@
 		await write(() => svc.removeNode(n.id, data));
 		if (alive) removing = null;
 	}
-	const nodeUse = n => n.id === data.mainNode && data.enabled ? t('Main node') : n.id === data.udpNode ? t('UDP node') : '';
-	/* 订阅常带来几十上百个节点：表格列出，按名称、地址或协议检索；使用中的节点排在最前 */
-	let nodeQuery = $state('');
+	const nodeUse = n => custom ? (data.custom.outbounds.some(o => o.enabled && (o.node === n.id || o.urltest.includes(n.id))) ? t('Used by routing') : '')
+		: n.id === data.mainNode && data.enabled ? t('Main node') : n.id === data.udpNode ? t('UDP node') : '';
+	/* 被配置引用的节点（含停用的出站、关闭代理前的主节点）不能删 */
+	const nodeBusy = n => n.id === data.mainNode || n.id === data.udpNode || data.used.includes(n.id);
+	/* 订阅常带来几十上百个节点：表格列出，按名称、地址或协议检索，可按来源（各订阅/手工添加）筛选；使用中的节点排在最前 */
+	let nodeQuery = $state(''), nodeSource = $state('all');
+	const groups = $derived(data ? nodeGroups(data.subscriptions, data.nodes) : { groups: [], manual: 0, orphan: 0 });
+	const groupHashes = $derived(new Set(groups.groups.map(g => g.hash)));
 	const nodeRows = $derived.by(() => {
 		const q = nodeQuery.trim().toLowerCase();
-		const list = (data?.nodes || []).filter(n => !q || `${n.label} ${n.type} ${n.address}`.toLowerCase().includes(q));
+		const list = (data?.nodes || []).filter(n => (nodeSource === 'all' || sourceOf(n, groupHashes) === nodeSource) && (!q || `${n.label} ${n.type} ${n.address}`.toLowerCase().includes(q)));
 		return [...list].sort((a, b) => !!nodeUse(b) - !!nodeUse(a));
 	});
-	const nodeCells = n => [{ text: n.label }, { text: n.type.toUpperCase(), nowrap: true }, { text: n.address ? `${n.address}:${n.port}` : '-', mono: true }, { text: '' }, { text: n.subscribed ? t('Subscription') : t('Added manually') }];
+	const sourceName = n => { const src = sourceOf(n, groupHashes); return src === MANUAL ? t('Added manually') : src === ORPHAN ? t('Removed subscription') : groups.groups.find(g => g.hash === src)?.title; };
+	const nodeCells = n => [{ text: n.label }, { text: n.type.toUpperCase(), nowrap: true }, { text: n.address ? `${n.address}:${n.port}` : '-', mono: true }, { text: '' }, { text: sourceName(n) }];
+	const nodeAttrs = n => ({ 'data-node': n.id, 'data-clickable': '', onclick: e => { if (!e.target.closest('button, a, input')) openNode(n); } });
+	function showSource(source) { nodeSource = source; nodeQuery = ''; section = 'nodes'; changeSection('nodes'); }
+	/* 手工添加与编辑：抽屉里的表单自己登记未保存改动，关闭前经 requestLeave 确认 */
+	let nodeEditing = $state(null);   // { id, raw, subscribed, label }
+	async function openNode(n = null) {
+		if (locked || !await requestLeave()) return;
+		nodeEditing = n ? { id: n.id, raw: n.raw, subscribed: n.subscribed, label: n.label } : { id: '', raw: null, subscribed: false, label: '' };
+	}
+	async function closeNode() { if (!await requestLeave()) return; nodeEditing = null; }
+	async function saveNode(plan) {
+		const id = nodeEditing.id;
+		const ok = await write(() => svc.saveNode(id, plan, data), id ? t('Node %s saved.', plan.values.label) : t('Node %s added.', plan.values.label));
+		if (ok && alive) nodeEditing = null;
+	}
 	/* 延迟：路由器直接 ping 各节点服务器，最多 4 个同时进行；结果只保留在本页 */
 	let latency = $state({});       // 节点 id → undefined | 'testing' | 毫秒 | 'timeout' | 'unsupported' | 'error'
 	let testing = $state(false);
@@ -191,8 +224,13 @@
 		const r = { mode: routing.mode, udpNode: routing.udpNode, dnsServer: routing.dns === 'custom' ? routing.dnsCustom : routing.dns, chinaDnsServer: routing.china === 'custom' ? routing.chinaCustom : routing.china };
 		routingErrors = validateRouting(r, data.nodes).map(m => ({ text: t(m), field: routingFields[m] }));
 		if (routingErrors.length) { await tick(); routingSummary?.focus(); return; }
-		await write(() => svc.saveRouting(r));
+		/* 切到自定义：没有自定义配置时按所选模板建立；切回预设模式：主节点按代理开关状态确定 */
+		if (r.mode === 'custom' && !custom) { const tpl = template; await write(() => svc.enterCustom(data, tpl, t), t('Switched to custom routing.')); }
+		else if (r.mode !== 'custom' && custom) await write(() => svc.leaveCustom(data, r));
+		else if (r.mode !== 'custom') await write(() => svc.saveRouting(r));
 	}
+	const templateLabel = v => ({ bypass_china: t('Bypass mainland China'), global: t('Proxy everything'), blank: t('Start empty') }[v]);
+	const templateHint = v => ({ bypass_china: t('Mainland China sites and addresses go direct, everything else through the proxy.'), global: t('Everything goes through the proxy except local network addresses.'), blank: t('Everything goes direct until you add rules.') }[v]);
 	const dnsLabel = v => v === 'wan' ? t('Uplink DNS (from WAN)') : { '1.1.1.1': 'Cloudflare (1.1.1.1)', '8.8.8.8': 'Google (8.8.8.8)', '208.67.222.222': 'Cisco OpenDNS (208.67.222.222)', '223.5.5.5': t('Aliyun (223.5.5.5)'), '119.29.29.29': t('Tencent (119.29.29.29)'), '210.2.4.8': 'CNNIC (210.2.4.8)' }[v] || v;
 
 	/* --- 设备 --- */
@@ -301,10 +339,10 @@
 {/snippet}
 
 {#snippet nodeActions(n)}
-	{#if !nodeUse(n)}
-		<Button size="compact" disabled={locked || custom} onclick={() => write(() => svc.useNode(n.id))}>{t('Use')}</Button>
-		<Button size="compact" disabled={locked} onclick={() => removing = n} aria-label={t('Delete node %s', n.label)}>{t('Delete')}</Button>
-	{:else}<span class="muted">{t('In use')}</span>{/if}
+	{#if !nodeUse(n) && !custom}<Button size="compact" disabled={locked} onclick={() => write(() => svc.useNode(n.id))}>{t('Use')}</Button>{/if}
+	<Button size="compact" disabled={locked} onclick={() => openNode(n)} aria-label={t('Edit node %s', n.label)}>{t('Edit')}</Button>
+	{#if !nodeUse(n) && !nodeBusy(n)}<Button size="compact" disabled={locked} onclick={() => removing = n} aria-label={t('Delete node %s', n.label)}>{t('Delete')}</Button>
+	{:else if nodeUse(n)}<span class="muted">{t('In use')}</span>{/if}
 {/snippet}
 
 <Dialog open={confirmClean} tone="danger" busy={logBusy} title={t('Clear the %s log?', logName === 'homeproxy' ? t('Service') : 'sing-box')} confirmLabel={t('Clear log')} cancelLabel={t('Cancel')}
@@ -328,7 +366,7 @@
 		<Card>
 			<StatusHero data-state={heroState} data-homeproxy icon="proxy" tone={{ on: 'success', warning: 'warning' }[heroState] || 'muted'} title={t('Proxy')}
 				status={heroText} hint={[modeLabel(data.mode), data.version ? `sing-box ${data.version}` : ''].filter(Boolean).join(' · ')}>
-				{#snippet actions()}<Switch checked={data.enabled} disabled={locked || (!data.enabled && !data.nodes.length)} aria-label={t('Proxy')} onchange={toggle} />{/snippet}
+				{#snippet actions()}<Switch checked={data.enabled} disabled={locked || (!custom && !data.enabled && !data.nodes.length)} aria-label={t('Proxy')} onchange={toggle} />{/snippet}
 				<div class="checks" role="group" aria-label={t('Connectivity')}>
 					<span class="muted">{t('Connectivity')}</span>
 					{#each SITES as site}
@@ -355,18 +393,27 @@
 
 		<!-- 节点 -->
 		<div id={`${tabsId}-panel-0`} role="tabpanel" aria-labelledby={`${tabsId}-tab-0`} hidden={section !== 'nodes'} tabindex="0">
-			<p class="note muted">{custom ? t('Custom routing is in use; the main node is not used in this mode.') : t('Choose the node the proxy uses. Add nodes by importing share links.')}</p>
+			<p class="note muted">{custom ? t('Custom routing is in use: rules send traffic to outbounds, which use these nodes.') : t('Choose the node the proxy uses. Add nodes by hand, import share links, or add a subscription.')}</p>
 			<Card icon="proxy" flush>
 				<Toolbar label={t('Node tools')} count={t('%d of %d nodes', nodeRows.length, data.nodes.length)}>
 					{#snippet search()}<Input type="search" size="compact" bind:value={nodeQuery} placeholder={t('Name, address or protocol')} aria-label={t('Search nodes')} />{/snippet}
+					{#if groups.groups.length || groups.orphan}
+						<Select size="compact" bind:value={nodeSource} aria-label={t('Source')} data-hp-source>
+							<option value="all">{t('All sources')}</option>
+							<option value={MANUAL}>{t('Added manually')} ({groups.manual})</option>
+							{#each groups.groups as g (g.hash)}<option value={g.hash}>{g.title} ({g.count})</option>{/each}
+							{#if groups.orphan}<option value={ORPHAN}>{t('Removed subscription')} ({groups.orphan})</option>{/if}
+						</Select>
+					{/if}
 					{#snippet actions()}
 						<Button size="compact" onclick={testLatency} disabled={testing || !nodeRows.length} title={t('Pings each node’s server from the router. It shows how far the server is, not how fast the proxy is; servers that block ping show “No reply”.')}>{testing ? t('Testing…') : t('Test latency')}</Button>
-						<Button variant="primary" size="compact" onclick={openImport} disabled={locked}>{t('Import links')}</Button>
+						<Button size="compact" onclick={openImport} disabled={locked}>{t('Import links')}</Button>
+						<Button variant="primary" size="compact" onclick={() => openNode()} disabled={locked}>{t('Add node')}</Button>
 					{/snippet}
 				</Toolbar>
 				<Table headers={[t('Node'), t('Protocol'), t('Address'), t('Latency'), t('Source')]} rate={[3]} rows={nodeRows} cells={nodeCells} rowKey={n => n.id}
-					rowAttrs={n => ({ 'data-node': n.id })} cellContent={nodeContent} actions={nodeActions} actionsLabel={t('Actions')}
-					empty={data.nodes.length ? t('No matching nodes') : t('No nodes yet. Import share links or add a subscription to get nodes.')} />
+					rowAttrs={nodeAttrs} cellContent={nodeContent} actions={nodeActions} actionsLabel={t('Actions')}
+					empty={data.nodes.length ? t('No matching nodes') : t('No nodes yet. Add a node, import share links or add a subscription.')} />
 			</Card>
 		</div>
 
@@ -376,49 +423,64 @@
 				<Card>
 					<form class="form" onsubmit={saveRouting} aria-label={t('Routing & DNS')}>
 						<ErrorSummary errors={routingErrors} bind:this={routingSummary} />
-						<SettingRow id="hp-mode" label={t('What goes through the proxy')} description={custom ? t('Custom routing rules were set up outside this page and are kept as they are. Choose another mode to manage routing here.') : t('Traffic not covered goes out directly.')}>
-							<Select id="hp-mode" aria-describedby="hp-mode-description" bind:value={routing.mode} disabled={locked || custom} aria-label={t('What goes through the proxy')}>
+						<SettingRow id="hp-mode" label={t('What goes through the proxy')} description={routing.mode === 'custom' ? t('Your own rules decide where each kind of traffic goes. Set them up below.') : t('Traffic not covered goes out directly.')}>
+							<Select id="hp-mode" aria-describedby="hp-mode-description" bind:value={routing.mode} disabled={locked} aria-label={t('What goes through the proxy')}>
 								{#each MODES as m}<option value={m}>{modeLabel(m)}</option>{/each}
-								{#if custom}<option value="custom">{modeLabel('custom')}</option>{/if}
+								<option value="custom">{modeLabel('custom')}</option>
 							</Select>
 						</SettingRow>
-						<SettingRow id="hp-udp" label={t('UDP traffic')} description={t('Games and voice calls use UDP. Send it through the main node, a different node, or directly.')}>
-							<Select id="hp-udp" aria-describedby="hp-udp-description" bind:value={routing.udpNode} disabled={locked} aria-label={t('UDP traffic')} aria-invalid={!!routingError('hp-udp')}>
-								<option value="same">{t('Same as main node')}</option>
-								<option value="nil">{t('Go out directly')}</option>
-								{#each data.nodes as n (n.id)}<option value={n.id}>{n.label}</option>{/each}
-								{#if !['same', 'nil'].includes(routing.udpNode) && !data.nodes.some(n => n.id === routing.udpNode)}<option value={routing.udpNode}>{routing.udpNode}</option>{/if}
-							</Select>
-						</SettingRow>
-						<SettingRow id="hp-dns" label={t('DNS server')} description={t('Resolves names for proxied traffic. Plain addresses use UDP; tcp://, tls:// and https:// addresses are also accepted.')}>
-							<div class="dns">
-								<Select id="hp-dns" aria-describedby="hp-dns-description" bind:value={routing.dns} disabled={locked} aria-label={t('DNS server')}>
-									{#each DNS_PRESETS as v}<option value={v}>{dnsLabel(v)}</option>{/each}
-									<option value="custom">{t('Custom…')}</option>
+						{#if routing.mode === 'custom' && !custom}
+							{#if data.custom.outbounds.length}
+								<p class="muted" data-hp-template="existing">{t('Your previous custom routing setup will be used again.')}</p>
+							{:else if !data.nodes.length}
+								<Feedback tone="info" message={t('Add a node first. Custom routing sends traffic to outbounds that use your nodes.')} compact />
+							{:else}
+								<RadioGroup name="hp-template" label={t('Start with')} bind:value={template} disabled={locked}
+									options={TEMPLATES.map(v => ({ value: v, label: templateLabel(v) }))} />
+								<p class="muted" data-hp-template-hint>{templateHint(template)} {t('The proxy uses %s. You can change every rule afterwards.', (data.nodes.find(n => n.id === data.mainNode) || data.nodes[0]).label)}</p>
+							{/if}
+						{/if}
+						{#if routing.mode !== 'custom'}
+							<SettingRow id="hp-udp" label={t('UDP traffic')} description={t('Games and voice calls use UDP. Send it through the main node, a different node, or directly.')}>
+								<Select id="hp-udp" aria-describedby="hp-udp-description" bind:value={routing.udpNode} disabled={locked} aria-label={t('UDP traffic')} aria-invalid={!!routingError('hp-udp')}>
+									<option value="same">{t('Same as main node')}</option>
+									<option value="nil">{t('Go out directly')}</option>
+									{#each data.nodes as n (n.id)}<option value={n.id}>{n.label}</option>{/each}
+									{#if !['same', 'nil'].includes(routing.udpNode) && !data.nodes.some(n => n.id === routing.udpNode)}<option value={routing.udpNode}>{routing.udpNode}</option>{/if}
 								</Select>
-								{#if routing.dns === 'custom'}
-									<Input id="hp-dns-custom" bind:value={routing.dnsCustom} disabled={locked} placeholder="tls://dns.google" spellcheck="false" aria-label={t('Custom DNS server')} aria-invalid={!!routingError('hp-dns-custom')} />
-								{/if}
-							</div>
-						</SettingRow>
-						{#if routing.mode === 'bypass_mainland_china'}
-							<SettingRow id="hp-china" label={t('China DNS server')} description={t('Resolves mainland China domains so they go out directly.')}>
+							</SettingRow>
+							<SettingRow id="hp-dns" label={t('DNS server')} description={t('Resolves names for proxied traffic. Plain addresses use UDP; tcp://, tls:// and https:// addresses are also accepted.')}>
 								<div class="dns">
-									<Select id="hp-china" aria-describedby="hp-china-description" bind:value={routing.china} disabled={locked} aria-label={t('China DNS server')}>
-										{#each CHINA_DNS_PRESETS as v}<option value={v}>{dnsLabel(v)}</option>{/each}
+									<Select id="hp-dns" aria-describedby="hp-dns-description" bind:value={routing.dns} disabled={locked} aria-label={t('DNS server')}>
+										{#each DNS_PRESETS as v}<option value={v}>{dnsLabel(v)}</option>{/each}
 										<option value="custom">{t('Custom…')}</option>
 									</Select>
-									{#if routing.china === 'custom'}
-										<Input id="hp-china-custom" bind:value={routing.chinaCustom} disabled={locked} placeholder="223.5.5.5" spellcheck="false" aria-label={t('Custom China DNS server')} aria-invalid={!!routingError('hp-china-custom')} />
+									{#if routing.dns === 'custom'}
+										<Input id="hp-dns-custom" bind:value={routing.dnsCustom} disabled={locked} placeholder="tls://dns.google" spellcheck="false" aria-label={t('Custom DNS server')} aria-invalid={!!routingError('hp-dns-custom')} />
 									{/if}
 								</div>
 							</SettingRow>
+							{#if routing.mode === 'bypass_mainland_china'}
+								<SettingRow id="hp-china" label={t('China DNS server')} description={t('Resolves mainland China domains so they go out directly.')}>
+									<div class="dns">
+										<Select id="hp-china" aria-describedby="hp-china-description" bind:value={routing.china} disabled={locked} aria-label={t('China DNS server')}>
+											{#each CHINA_DNS_PRESETS as v}<option value={v}>{dnsLabel(v)}</option>{/each}
+											<option value="custom">{t('Custom…')}</option>
+										</Select>
+										{#if routing.china === 'custom'}
+											<Input id="hp-china-custom" bind:value={routing.chinaCustom} disabled={locked} placeholder="223.5.5.5" spellcheck="false" aria-label={t('Custom China DNS server')} aria-invalid={!!routingError('hp-china-custom')} />
+										{/if}
+									</div>
+								</SettingRow>
+							{/if}
 						{/if}
 						<FormActions busy={locked} disabled={!routingDirty} description={t('Changes take effect when you save. If the device becomes unreachable, they roll back automatically.')} />
 					</form>
 				</Card>
 			{/if}
-			{#if !custom}
+			{#if custom}
+				<CustomRouting {data} {svc} {locked} {write} error={drawerError} />
+			{:else}
 				<div class="domains">
 					<Card title={t('Custom domains')}>
 						{#if domainsLoadError}<Feedback tone="error" message={t('Domain lists could not be read: %s', domainsLoadError)} onretry={loadDomains} compact />
@@ -498,6 +560,7 @@
 						</SettingRow>
 					</div>
 				</Card>
+				<SubscriptionTools {data} {svc} {locked} {write} onshow={showSource} />
 				<Card title={t('Routing rule data')}>
 					<p class="muted lead">{t('Address and domain lists that decide what goes direct. Updating downloads the latest lists.')}</p>
 					{#if resourcesError}<Feedback tone="error" message={t('Rule data versions could not be read: %s', resourcesError)} onretry={loadResources} compact />{/if}
@@ -540,7 +603,11 @@
 			</Card>
 		</div>
 
-		<Drawer error={error || (notice?.tone === 'error' ? notice.text : '')} open={!!importing} title={t('Import share links')} onclose={closeImport}>
+		<Drawer error={drawerError} open={!!nodeEditing} title={nodeEditing?.id ? t('Edit node %s', nodeEditing.label) : t('Add node')} onclose={closeNode}>
+			{#if nodeEditing}<NodeForm target={nodeEditing} features={data.features} {locked} onsubmit={saveNode} oncancel={closeNode} />{/if}
+		</Drawer>
+
+		<Drawer error={drawerError} open={!!importing} title={t('Import share links')} onclose={closeImport}>
 			{#if importing}
 				<form class="form" onsubmit={doImport} aria-label={t('Import share links')}>
 					<Field id="hp-links" label={t('Share links')} help={t('One link per line: vless://, vmess://, trojan://, ss://, hysteria2://, tuic://, anytls://, socks5://, http(s)://')}>

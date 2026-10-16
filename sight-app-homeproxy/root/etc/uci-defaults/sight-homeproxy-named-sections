@@ -1,0 +1,6 @@
+#!/bin/sh
+
+# 匿名的节点、出站、规则等改为具名段（Sight 按段名引用），装包与升级时执行
+ucode "/etc/homeproxy/scripts/sight_named_sections.uc"
+
+exit 0
