@@ -1,6 +1,6 @@
 # umiwrt-plugins
 
-UmiWrt 自维护的应用 feed。每个目录是一个 OpenWrt 包，连同它在 [Sight](https://github.com/umi-cloud/luci-theme-sight) 里的页面一起维护；许可证以各目录内的 LICENSE 为准。
+UmiWrt 自维护的应用 feed。每个目录是一个 OpenWrt 包，连同它在 [Sight](https://github.com/umi-cloud/sight-ui) 里的页面一起维护；许可证以各目录内的 LICENSE 为准。
 
 | 目录 | 内容 | 上游与基线 |
 |------|------|------------|
@@ -34,7 +34,7 @@ sight-app-<id>/
 
 ## 开发
 
-以下命令里 `SIGHT_UI` 指向 `luci-theme-sight/sight-ui` 的本地检出。
+以下命令里 `SIGHT_UI` 指向 `umi-cloud/sight-ui` 仓库的本地检出。
 
 ```sh
 # 构建页面（必须用 sight-ui 的工具，保证与宿主同一版本的 Svelte）
