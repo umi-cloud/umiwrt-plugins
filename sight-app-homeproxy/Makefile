@@ -8,7 +8,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=sight-app-homeproxy
 PKG_VERSION:=1.1.0
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 
 PKG_LICENSE:=GPL-2.0-only
 PKG_LICENSE_FILES:=LICENSE
@@ -32,7 +32,7 @@ define Package/sight-app-homeproxy
 	+ucode-mod-ubus \
 	+ucode-mod-uci \
 	+sight-ui
-  PROVIDES:=luci-app-homeproxy
+  # 只声明互斥，不 PROVIDES luci-app-homeproxy：否则会连带选中 LuCI 的翻译包
   CONFLICTS:=luci-app-homeproxy
 endef
 
@@ -59,6 +59,13 @@ define Package/sight-app-homeproxy/install
 endef
 
 define Package/sight-app-homeproxy/postinst
+#!/bin/sh
+[ -n "$${IPKG_INSTROOT}" ] || /etc/init.d/rpcd reload
+exit 0
+endef
+
+# 卸载后重载 rpcd，撤下本包注册的接口与权限
+define Package/sight-app-homeproxy/postrm
 #!/bin/sh
 [ -n "$${IPKG_INSTROOT}" ] || /etc/init.d/rpcd reload
 exit 0

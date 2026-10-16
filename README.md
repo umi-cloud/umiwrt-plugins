@@ -45,6 +45,14 @@ sight-app-<id>/
 
 页面与 Sight 共用运行时和组件，约定见 sight-ui 的 `docs/plugins.md`。
 
+打包约定：
+
+- 不依赖 LuCI（`luci-base`、`luci-app-*`）。需要的 LuCI 后端移植进本包，保留原版权与许可声明，`PKG_LICENSE` 列出全部许可证；`LICENSE` 放在包目录。
+- 启动项操作调宿主的 `sight.setInitAction`；rpcd 对象不要用 `luci.` 前缀（沿用上游名称的除外，如 `luci.homeproxy`）。
+- 与提供同名 rpcd 对象的 LuCI 包用 `CONFLICTS` 互斥，不写 `PROVIDES luci-app-*`（会连带选中 LuCI 翻译包）。
+- `postinst`、`postrm` 都重载 rpcd，装卸后接口与权限即时生效或撤下。
+- 不移植把参数直接拼进 shell 的方法；需要执行命令时用参数数组。
+
 ## 开发
 
 以下命令里 `SIGHT_UI` 指向 `umi-cloud/sight-ui` 仓库的本地检出。

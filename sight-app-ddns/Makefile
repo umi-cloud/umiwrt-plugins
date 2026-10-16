@@ -6,10 +6,11 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=sight-app-ddns
 PKG_VERSION:=1.1.0
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 
 # root/usr/share/rpcd/ucode/sight.ddns 为 Apache-2.0，其余为 GPL-2.0-only
 PKG_LICENSE:=GPL-2.0-only Apache-2.0
+PKG_LICENSE_FILES:=LICENSE
 
 include $(INCLUDE_DIR)/package.mk
 
@@ -37,6 +38,13 @@ define Package/sight-app-ddns/install
 endef
 
 define Package/sight-app-ddns/postinst
+#!/bin/sh
+[ -n "$${IPKG_INSTROOT}" ] || /etc/init.d/rpcd reload
+exit 0
+endef
+
+# 卸载后重载 rpcd，撤下本包注册的接口与权限
+define Package/sight-app-ddns/postrm
 #!/bin/sh
 [ -n "$${IPKG_INSTROOT}" ] || /etc/init.d/rpcd reload
 exit 0

@@ -7,10 +7,11 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=sight-app-docker
 PKG_VERSION:=1.1.0
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 
 # root/usr/share/rpcd/ucode/sight.docker 与 root/usr/share/ucode/sight/docker_socket.uc 为 Apache-2.0
 PKG_LICENSE:=GPL-2.0-only Apache-2.0
+PKG_LICENSE_FILES:=LICENSE
 
 include $(INCLUDE_DIR)/package.mk
 
@@ -39,6 +40,13 @@ define Package/sight-app-docker/install
 endef
 
 define Package/sight-app-docker/postinst
+#!/bin/sh
+[ -n "$${IPKG_INSTROOT}" ] || /etc/init.d/rpcd reload
+exit 0
+endef
+
+# 卸载后重载 rpcd，撤下本包注册的接口与权限
+define Package/sight-app-docker/postrm
 #!/bin/sh
 [ -n "$${IPKG_INSTROOT}" ] || /etc/init.d/rpcd reload
 exit 0

@@ -2,7 +2,8 @@
 
 // Docker 引擎接口（对象 docker、docker.container、docker.image 等），移植自 luci-app-dockerman 的
 // rpcd/ucode/docker_rpc.uc，使插件不依赖 luci-app-dockerman / luci-base：
-// luci.http 的 build_querystring 改为本文件内实现，luci.docker_socket 改为同样移植过来的 sight.docker_socket，其余保持原样。
+// luci.http 的 build_querystring 改为本文件内实现，luci.docker_socket 改为同样移植过来的 sight.docker_socket；
+// 去掉 ttyd_start（把参数直接拼进 shell 命令，且 ttyd 不是本包依赖），其余保持原样。
 // Copyright 2025 Paul Donald / luci-lib-docker-js
 // Licensed to the public under the Apache License 2.0.
 // Built against the docker v1.47 API
@@ -302,44 +303,6 @@ function call_docker(method, path, options) {
 	};
 };
 
-function run_ttyd(request) {
-
-	const id = request.args.id || '';
-	const cmd = request.args.cmd || '/bin/sh';
-	const port = request.args.port || 7682;
-	const uid = request.args.uid || '';
-
-	if (!id) {
-		return { error: 'Container ID is required' };
-	}
-
-	let ttyd_cmd = `ttyd -q -d 2 --once --writable -p ${port} docker`;
-	const sock_addr = ds.get_socket_dest();
-
-	/* Build the full command:
-	ttyd --writable -d 2 --once -p PORT docker -H unix://SOCKET exec -it [-u UID] CONTAINER CMD
-
-	if the socket is /var/run/docker.sock, prefix unix://
-
-	Note: invocations of docker -H x.x.x.x:2375 [..] will fail after v27 without --tls*
-	*/
-	const sock_str = index(sock_addr, '/') != -1 && index(sock_addr, 'unix://') == -1 ? 'unix://' + sock_addr : sock_addr;
-	ttyd_cmd = `${ttyd_cmd} -H "${sock_str}" exec -it`;
-	if (uid && uid !== '') {
-		ttyd_cmd = `${ttyd_cmd} -u ${uid}`;
-	}
-
-	ttyd_cmd = `${ttyd_cmd} ${id} ${cmd} &`;
-
-	// Try to kill any existing ttyd processes on this port
-	system(`pkill -f "ttyd.*-p ${port}"` + ' 2>/dev/null; true');
-
-	// Start ttyd
-	system(ttyd_cmd);
-
-	return { status: 'ttyd started', command: ttyd_cmd };
-}
-
 // https://docs.docker.com/reference/api/engine/version/v1.47/
 
 /* Note: methods here are included for structural reference. Some rpcd methods
@@ -399,8 +362,6 @@ const container_methods = {
 	exec:    { args: { id: '', opts: {} }, call: (request) => call_docker('POST', `/containers/${request.args.id}/exec`, { payload: request.args.opts }) },
 	prune:   { args: { query: { 'filters': '' } }, call: (request) => call_docker('POST', '/containers/prune', { query: request.args.query }) },
 
-	// Not a docker command - but a local command to invoke ttyd so our browser can open websocket to docker
-	ttyd_start: { args: { id: '', cmd: '/bin/sh', port: 7682, uid: '' }, call: (request) => run_ttyd(request) },
 };
 
 const image_methods = {
