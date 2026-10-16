@@ -6,7 +6,7 @@ UmiWrt 自维护的应用 feed。每个目录是一个 OpenWrt 包，连同它�
 |------|------|------------|
 | `sight-app-homeproxy/` | HomeProxy 后端（sing-box 客户端）与 Sight 页面，不含 LuCI 界面，不依赖 luci-base | [immortalwrt/homeproxy](https://github.com/immortalwrt/homeproxy) `master` `98a6ad9` |
 | `sight-app-ddns/` | DDNS 的 Sight 页面、权限与状态接口 `sight.ddns`（移植自 luci-app-ddns，Apache-2.0）；服务由 `ddns-scripts` 提供 | 页面原创；`sight.ddns` 取自 luci-app-ddns |
-| `sight-app-docker/` | Docker 的 Sight 页面、权限与引擎接口 `docker.*`（移植自 luci-app-dockerman 的 rpcd 后端，Apache-2.0）；引擎由 `dockerd` 提供，与 luci-app-dockerman 互斥 | 页面原创；`docker.*` 取自 luci-app-dockerman |
+| `sight-app-docker/` | Docker 的 Sight 页面、权限与引擎接口 `docker.*`（移植自 luci-app-dockerman 的 rpcd 后端，Apache-2.0），以及本包新增的 `sight.docker`（日志、后台拉取镜像）；引擎由 `dockerd` 提供，与 luci-app-dockerman 互斥 | 页面原创；`docker.*` 取自 luci-app-dockerman |
 
 ## 使用
 
@@ -48,7 +48,7 @@ sight-app-<id>/
 打包约定：
 
 - 不依赖 LuCI（`luci-base`、`luci-app-*`）。需要的 LuCI 后端移植进本包，保留原版权与许可声明，`PKG_LICENSE` 列出全部许可证；`LICENSE` 放在包目录。
-- 启动项操作调宿主的 `sight.setInitAction`；rpcd 对象不要用 `luci.` 前缀（沿用上游名称的除外，如 `luci.homeproxy`）。
+- 启动项操作调宿主的 `sight.setInitAction`，包里用 `EXTRA_DEPENDS:=sight-ui (>=0.4.0)` 约束宿主版本；rpcd 对象不要用 `luci.` 前缀（沿用上游名称的除外，如 `luci.homeproxy`）。
 - 与提供同名 rpcd 对象的 LuCI 包用 `CONFLICTS` 互斥，不写 `PROVIDES luci-app-*`（会连带选中 LuCI 翻译包）。
 - `postinst`、`postrm` 都重载 rpcd，装卸后接口与权限即时生效或撤下。
 - 不移植把参数直接拼进 shell 的方法；需要执行命令时用参数数组。

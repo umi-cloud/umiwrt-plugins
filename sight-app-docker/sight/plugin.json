@@ -1,9 +1,21 @@
 {
 	"id": "docker",
 	"title": "Docker",
-	"description": "See which containers are running, restart them and read their logs.",
+	"description": "Run containers on the router: create, start and stop them, read their logs, download images and set a registry mirror.",
 	"icon": "container",
 	"group": "applications",
-	"version": "1.1.0",
-	"package": "sight-app-docker"
+	"version": "1.2.0",
+	"package": "sight-app-docker",
+	"changes": {
+		"dockerd": {
+			"label": "Docker",
+			"options": {
+				"registry_mirrors": "Registry mirrors",
+				"data_root": "Data directory"
+			},
+			"types": [
+				"globals"
+			]
+		}
+	}
 }
