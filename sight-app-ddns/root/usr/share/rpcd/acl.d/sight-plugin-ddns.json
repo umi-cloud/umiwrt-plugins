@@ -1,9 +1,10 @@
 {
 	"sight-plugin-ddns": {
-		"description": "Sight DDNS page: entries, state, provider list, logs and on-demand updates",
+		"description": "Sight DDNS page: entries, state, current address, provider list, logs and on-demand updates",
 		"read": {
 			"ubus": {
 				"sight.ddns": [
+					"get_current_ip",
 					"get_ddns_state",
 					"get_services_log",
 					"get_services_status"

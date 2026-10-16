@@ -1,6 +1,6 @@
 #!/usr/bin/env ucode
 // DDNS 状态与日志（对象 sight.ddns），移植自 luci-app-ddns 的 rpcd/ucode/ddns.uc（Apache License 2.0），
-// 使插件不依赖 luci-app-ddns / luci-base：luci.sys 的 init_enabled 内联到本文件，其余保持原样。
+// 使插件不依赖 luci-app-ddns / luci-base：luci.sys 的 init_enabled 内联到本文件；get_current_ip 为本插件新增。
 
 'use strict';
 
@@ -92,7 +92,48 @@ function calc_seconds(interval, unit) {
 	}
 }
 
+// 本机当前地址：载入条目配置后调用 ddns-scripts 自己的 get_current_ip（与更新进程同一套逻辑，支持全部地址来源），
+// 默认值同 dynamic_dns_updater.sh；LUCI_HELPER 置位后检测失败不重试、不写日志；web/script 来源同 lucihelper 限时 3 秒。
+// 条目名作为 $1 传入；全部输出丢弃，只把地址写到临时文件再打印。
+const current_ip_script = `{
+. /usr/lib/ddns/dynamic_dns_functions.sh
+LUCI_HELPER=1
+load_all_config_options ddns "$1" || exit 0
+VERBOSE=0; use_logfile=0; use_syslog=0
+OUT="$ddns_rundir/sight_ip.$$.out"; DATFILE="$ddns_rundir/sight_ip.$$.dat"; ERRFILE="$ddns_rundir/sight_ip.$$.err"
+[ -z "$use_ipv6" ] && use_ipv6=0
+[ -z "$force_ipversion" ] && force_ipversion=0
+[ -z "$use_https" ] && use_https=0
+[ -z "$ip_source" ] && ip_source=network
+[ "$ip_source" = network ] && [ -z "$ip_network" ] && { [ $use_ipv6 -eq 0 ] && ip_network=wan || ip_network=wan6; }
+[ "$ip_source" = web ] && [ -z "$ip_url" ] && { [ $use_ipv6 -eq 0 ] && ip_url=http://checkip.dyndns.com || ip_url=http://checkipv6.dyndns.com; }
+[ "$ip_source" = interface ] && [ -z "$ip_interface" ] && ip_interface=eth1
+sight_ip() { get_current_ip IP && printf %s "$IP" > "$OUT"; }
+case "$ip_source" in web|script) timeout 3 -- sight_ip ;; *) sight_ip ;; esac
+} >/dev/null 2>&1
+[ -f "$OUT" ] && cat "$OUT"
+rm -f "$OUT" "$DATFILE" "$ERRFILE"`;
+
 const methods = {
+	get_current_ip: {
+		args: { service_name: 'service_name' },
+		call: function(request) {
+			const name = request.args?.service_name;
+			if (type(name) != 'string' || !match(name, /^[A-Za-z0-9_]+$/) || uci.get('ddns', name) != 'service') {
+				uci.unload('ddns');
+				return { error: 'No such DDNS entry' };
+			}
+			uci.unload('ddns');
+
+			const p = popen(`/bin/sh -c ${shellquote(current_ip_script)} sight_ip ${shellquote(name)}`, 'r');
+			const out = trim(p?.read('all') || '');
+			p?.close();
+
+			// 只接受地址字符，其余视为检测不到
+			return { ip: match(out, /^[0-9A-Fa-f:.]+$/) ? out : null };
+		}
+	},
+
 	get_services_log: {
 		args: { service_name: 'service_name' },
 		call: function(request) {
