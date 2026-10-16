@@ -1,0 +1,44 @@
+{
+	"sdk": 1,
+	"apps": [
+		{
+			"id": "ddns",
+			"package": "sight-app-ddns",
+			"title": "DDNS",
+			"description": "Keep domain names pointing at your changing public address.",
+			"icon": "dns",
+			"locales": {
+				"zh": {
+					"title": "DDNS",
+					"description": "让域名始终指向变化的公网地址。"
+				}
+			}
+		},
+		{
+			"id": "docker",
+			"package": "sight-app-docker",
+			"title": "Docker",
+			"description": "See which containers are running, restart them and read their logs.",
+			"icon": "container",
+			"locales": {
+				"zh": {
+					"title": "Docker",
+					"description": "查看运行中的容器、重启并读取日志。"
+				}
+			}
+		},
+		{
+			"id": "homeproxy",
+			"package": "sight-app-homeproxy",
+			"title": "HomeProxy",
+			"description": "Route traffic through your proxy nodes and choose what goes direct.",
+			"icon": "proxy",
+			"locales": {
+				"zh": {
+					"title": "HomeProxy",
+					"description": "通过代理节点转发流量，并决定哪些流量直连。"
+				}
+			}
+		}
+	]
+}
