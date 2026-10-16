@@ -1,0 +1,46 @@
+# 编出全部 sight-app-* 包，生成签名的 apk 源与 catalog.json，发布到 gh-pages 的 sdk<N>/。
+# 设备上的 sight-ui 带着源地址与公钥：https://umi-cloud.github.io/umiwrt-plugins/sdk<N>/packages.adb
+name: 发布应用源
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'sight-app-*/**'
+      - 'scripts/**'
+      - '.github/workflows/publish.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 编包并生成索引
+        env:
+          SIGN_KEY: ${{ secrets.SIGHT_APPS_SIGN_KEY }}
+        run: |
+          [ -n "$SIGN_KEY" ] || { echo "缺少仓库密钥 SIGHT_APPS_SIGN_KEY" >&2; exit 1; }
+          # SDK 容器以 uid 1000 运行，输出目录需可写
+          mkdir -p out && chmod 777 out
+          docker run --rm -e SIGN_KEY \
+            -v "$PWD:/src:ro" -v "$PWD/out:/out" \
+            immortalwrt/sdk:x86-64-openwrt-25.12 sh /src/scripts/build-repo.sh /src /out
+
+      # 保留 gh-pages 上已有文件：旧的 sdk<N>/ 目录继续服务未升级的设备，
+      # 旧版本包保留到设备刷新索引为止
+      - name: 发布到 gh-pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: out
+          keep_files: true
+          commit_message: 发布应用源

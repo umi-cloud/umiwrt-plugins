@@ -18,6 +18,19 @@ echo "src-git umiwrt_plugins https://github.com/umi-cloud/umiwrt-plugins.git" >>
 
 `sight-app-homeproxy` 声明了 `PROVIDES`/`CONFLICTS luci-app-homeproxy`，与 luci feed 里的原包二选一。
 
+## 应用源
+
+Sight 的应用市场从这里安装插件。推送到 `master` 后 CI（`.github/workflows/publish.yml`）在 ImmortalWrt SDK 镜像里编出全部 `sight-app-*`，生成签名索引与 `catalog.json`，发布到 gh-pages：
+
+```
+https://umi-cloud.github.io/umiwrt-plugins/sdk<N>/packages.adb
+```
+
+- `<N>` 是插件清单里的接口版本（sight-ui 的 `SDK_VERSION`），所有插件必须一致；旧目录保留给未升级的设备。
+- 签名私钥放在仓库 Secrets 的 `SIGHT_APPS_SIGN_KEY`，公钥随 sight-ui 装到设备 `/etc/apk/keys/sight-apps.pem`。
+- 发新版本要提高包的 `PKG_VERSION` 或 `PKG_RELEASE`，设备上才会出现「有更新」。
+- 本地生成测试源：`SIGN_KEY="$(cat 私钥.pem)" docker run --rm -e SIGN_KEY -v $PWD:/src:ro -v /tmp/repo:/out immortalwrt/sdk:x86-64-openwrt-25.12 sh /src/scripts/build-repo.sh /src /out`（`/tmp/repo` 需对容器内 uid 1000 可写）。
+
 ## 包的结构
 
 ```
