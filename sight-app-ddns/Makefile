@@ -6,7 +6,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=sight-app-ddns
 PKG_VERSION:=1.2.0
-PKG_RELEASE:=2
+PKG_RELEASE:=3
 
 # root/usr/share/rpcd/ucode/sight.ddns 为 Apache-2.0，其余为 GPL-2.0-only
 PKG_LICENSE:=GPL-2.0-only Apache-2.0
@@ -22,7 +22,7 @@ define Package/sight-app-ddns
   PKGARCH:=all
   # 启动项等系统接口由 sight-ui 0.4.0 起自带的 sight 对象提供
   EXTRA_DEPENDS:=sight-ui (>=0.5.0)
-  DEPENDS:=+ddns-scripts +rpcd-mod-ucode +ucode-mod-fs +ucode-mod-math +ucode-mod-uci +sight-ui
+  DEPENDS:=+ddns-scripts +rpcd +rpcd-mod-ucode +ucode-mod-fs +ucode-mod-math +ucode-mod-uci +sight-ui
 endef
 
 define Package/sight-app-ddns/description

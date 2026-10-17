@@ -9,7 +9,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=sight-app-docker
 PKG_VERSION:=1.3.0
-PKG_RELEASE:=2
+PKG_RELEASE:=3
 
 # root/usr/share/rpcd/ucode/sight.docker 与 root/usr/share/ucode/sight/docker_socket.uc 为 Apache-2.0
 PKG_LICENSE:=GPL-2.0-only Apache-2.0
@@ -25,7 +25,7 @@ define Package/sight-app-docker
   PKGARCH:=all
   # 启动项等系统接口由 sight-ui 0.4.0 起自带的 sight 对象提供
   EXTRA_DEPENDS:=sight-ui (>=0.5.0)
-  DEPENDS:=@(aarch64||arm||x86_64) +dockerd +docker +docker-compose +ttyd +rpcd-mod-ucode +ucode-mod-fs +ucode-mod-socket +ucode-mod-uci +ucode-mod-ubus +ucode-mod-uloop +sight-ui
+  DEPENDS:=@(aarch64||arm||x86_64) +dockerd +docker +docker-compose +ttyd +rpcd +rpcd-mod-ucode +ucode-mod-fs +ucode-mod-socket +ucode-mod-uci +ucode-mod-ubus +ucode-mod-uloop +sight-ui
   CONFLICTS:=luci-app-dockerman
 endef
 
