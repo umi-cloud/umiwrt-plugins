@@ -2,6 +2,19 @@
 	"sdk": 1,
 	"apps": [
 		{
+			"id": "adblock-fast",
+			"package": "sight-app-adblock-fast",
+			"title": "Ad blocking",
+			"description": "Block ads and trackers for every device on your network using DNS block-lists.",
+			"icon": "firewall",
+			"locales": {
+				"zh": {
+					"title": "广告过滤",
+					"description": "用 DNS 拦截列表为局域网内所有设备屏蔽广告和跟踪。"
+				}
+			}
+		},
+		{
 			"id": "ddns",
 			"package": "sight-app-ddns",
 			"title": "DDNS",
