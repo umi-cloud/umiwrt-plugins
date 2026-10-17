@@ -18,12 +18,12 @@
 			"id": "docker",
 			"package": "sight-app-docker",
 			"title": "Docker",
-			"description": "See which containers are running, restart them and read their logs.",
+			"description": "Run containers on the router: create, edit, update and open them, use a terminal, run Compose projects, manage images, networks and volumes, and set a registry mirror.",
 			"icon": "container",
 			"locales": {
 				"zh": {
 					"title": "Docker",
-					"description": "查看运行中的容器、重启并读取日志。"
+					"description": "在路由器上运行容器：新建、编辑、更新与打开容器，使用终端，运行 Compose 项目，管理镜像、网络与卷，设置镜像加速。"
 				}
 			}
 		},
