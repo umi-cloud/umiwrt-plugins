@@ -1,0 +1,20 @@
+{
+	"sight-plugin-adblock-fast": {
+		"description": "Sight Ad blocking page: adblock-fast settings, block-lists, custom domains and service state",
+		"read": {
+			"ubus": {
+				"service": [
+					"list"
+				]
+			},
+			"uci": [
+				"adblock-fast"
+			]
+		},
+		"write": {
+			"uci": [
+				"adblock-fast"
+			]
+		}
+	}
+}

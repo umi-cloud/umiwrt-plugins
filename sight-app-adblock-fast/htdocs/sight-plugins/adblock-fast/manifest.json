@@ -1,0 +1,33 @@
+{
+	"id": "adblock-fast",
+	"sdk": 1,
+	"version": "1.0.0+2bf906c4",
+	"path": "/adblock-fast",
+	"title": "Ad blocking",
+	"description": "Block ads and trackers for every device on your network using DNS block-lists.",
+	"icon": "firewall",
+	"group": "applications",
+	"package": "sight-app-adblock-fast",
+	"entry": "page.js",
+	"css": "page.css",
+	"locales": {
+		"zh": "zh.json"
+	},
+	"changes": {
+		"adblock-fast": {
+			"label": "Ad blocking",
+			"options": {
+				"enabled": "Enabled",
+				"force_dns": "Use the router’s DNS",
+				"blocked_domain": "Blocked domains",
+				"allowed_domain": "Allowed domains",
+				"name": "Name",
+				"url": "Address"
+			},
+			"types": [
+				"config",
+				"file_url"
+			]
+		}
+	}
+}
