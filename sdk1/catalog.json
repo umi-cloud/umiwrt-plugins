@@ -39,6 +39,19 @@
 					"description": "通过代理节点转发流量，并决定哪些流量直连。"
 				}
 			}
+		},
+		{
+			"id": "ttyd",
+			"package": "sight-app-ttyd",
+			"title": "Terminal",
+			"description": "Open a command line on the router in a browser tab.",
+			"icon": "terminal",
+			"locales": {
+				"zh": {
+					"title": "终端",
+					"description": "在浏览器标签页中打开路由器的命令行。"
+				}
+			}
 		}
 	]
 }
