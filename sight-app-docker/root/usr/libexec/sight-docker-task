@@ -1,0 +1,275 @@
+#!/usr/bin/ucode
+'use strict';
+/*
+ * 由 sight.docker 的 pull_start / recreate_start / compose_start 在后台启动，执行 /tmp/sight-docker/task.json 里
+ * 已校验的任务，把步骤、进度与错误写回同一文件；标准输出即任务日志（task.log），页面经 task_status 轮询。
+ * 不接受命令行参数；外部命令一律以参数数组执行，不经过 shell。
+ *   pull      下载镜像（POST /images/create 的逐行进度汇总）
+ *   recreate  用新配置重建容器：[下载] → 停止并改名旧容器 → 新建 → 启动 → 删除旧容器；
+ *             任一步失败删掉新容器、改回名字并恢复旧容器原来的运行状态。mode=update 时先拉取原镜像引用，
+ *             没有新版则不重建
+ *   compose   docker-compose up / pull / down / remove
+ */
+import { readfile, writefile, rename, access, unlink, rmdir, lsdir, stdout } from 'fs';
+import * as api from 'sight.docker_api';
+
+const DIR = '/tmp/sight-docker';
+const TASK = DIR + '/task.json';
+const COMPOSE_DIR = '/etc/sight-docker/compose';
+const COMPOSE = '/usr/bin/docker-compose';
+/* 新容器启动后观察这么久仍在运行才算成功（秒） */
+const SETTLE = 3;
+const BACKUP_SUFFIX = '-sight-old';
+
+const task = (() => { try { return json(readfile(TASK) || ''); } catch { return null; } })();
+if (!task || task.state != 'running' || !task.kind) exit(1);
+task.pid = int(split(readfile('/proc/self/stat') || '', ' ')[0]);
+
+let written = 0;
+function save(force) {
+	if (!force && time() == written) return;
+	written = time();
+	writefile(TASK + '.tmp', sprintf('%J', task));
+	rename(TASK + '.tmp', TASK);
+}
+/* 子进程与本进程共用 task.log，写完即刷出，保持先后顺序 */
+function log(msg) { print(msg, '\n'); stdout.flush(); }
+/* error 为英文 msgid，其中的 %s/%d 由 args 填入（页面翻译后再填） */
+function finish(state, error, args) {
+	task.state = state;
+	if (error) {
+		task.error = error;
+		if (args) task.error_args = args;
+		log('Error: ' + (args ? sprintf(error, ...args) : error));
+	}
+	task.finished = time();
+	for (let s in task.steps) if (s.state == 'running') s.state = state == 'done' ? 'done' : 'failed';
+	save(true);
+	exit(state == 'done' ? 0 : 1);
+}
+function step(name, state) {
+	for (let s in task.steps) if (s.name == name) s.state = state;
+	task.step = name;
+	save(true);
+}
+save(true);
+
+/* 镜像引用拆成 fromImage 与 tag（或 @ 后的摘要） */
+function split_ref(image) {
+	let from = image, tag = 'latest';
+	const at = index(image, '@'), colon = rindex(image, ':');
+	if (at >= 0) { from = substr(image, 0, at); tag = substr(image, at + 1); }
+	else if (colon > rindex(image, '/')) { from = substr(image, 0, colon); tag = substr(image, colon + 1); }
+	return [from, tag];
+}
+
+/* 下载镜像：进度按层汇总下载字节，已存在或已完成的层计满；失败返回原因 */
+function pull(image) {
+	const ref = split_ref(image), from = ref[0], tag = ref[1];
+	const layers = {};
+	let error = null;
+	log(`Pulling ${image}`);
+	const r = api.request('POST', '/images/create', { query: { fromImage: from, tag: tag }, on_line: (msg) => {
+		if (msg.error || msg.errorDetail) { error = msg.errorDetail?.message || msg.error; return; }
+		const status = msg.status || '';
+		if (!msg.id || match(status, /^(Pulling from|Digest:|Status:)/)) {
+			if (status) { task.status = status; log(status); }
+			return;
+		}
+		if (!layers[msg.id]) layers[msg.id] = { current: 0, total: 0, done: false };
+		const l = layers[msg.id];
+		const detail = msg.progressDetail || {};
+		if (status == 'Downloading' && detail.total) { l.total = detail.total; l.current = detail.current || 0; }
+		else if (match(status, /^(Download complete|Verifying Checksum|Extracting|Pull complete|Already exists)/)) {
+			l.current = l.total;
+			l.done = status == 'Pull complete' || status == 'Already exists';
+		}
+		let current = 0, total = 0, done = 0, count = 0;
+		for (let id, x in layers) { current += x.current; total += x.total; count++; if (x.done) done++; }
+		task.current = current; task.total = total; task.layers = count; task.layers_done = done;
+		if (status) task.status = status;
+		save(false);
+	} });
+	if (error) return error;
+	if (r.code >= 300 || !r.code) return api.reason(r);
+	return null;
+}
+
+function sleep(sec) { system(['sleep', '' + sec]); }
+
+function run_pull() {
+	step('pull', 'running');
+	const error = pull(task.image);
+	if (error) finish('failed', error);
+	finish('done');
+}
+
+/* ---- 重建容器 ---- */
+
+function inspect(id) {
+	const r = api.request('GET', `/containers/${id}/json`);
+	return r.code == 200 ? r.body : null;
+}
+
+function run_recreate() {
+	const old = inspect(task.id);
+	if (!old) finish('failed', 'The container no longer exists');
+	const name = ltrim(old.Name, '/'), new_name = task.new_name || name;
+	const was_running = !!old.State?.Running;
+	const body = task.body;
+	task.name = name;
+	task.was_running = was_running;
+	save(true);
+
+	if (task.mode == 'update') {
+		step('pull', 'running');
+		const ref = old.Config?.Image;
+		const error = pull(ref);
+		if (error) finish('failed', error);
+		const img = api.request('GET', `/images/${ref}/json`);
+		if (img.code != 200) finish('failed', api.reason(img));
+		step('pull', 'done');
+		if (img.body.Id == old.Image) {
+			task.result = 'latest';
+			for (let s in task.steps) if (s.state == 'pending') s.state = 'skipped';
+			log(`${ref} is already the latest version`);
+			finish('done');
+		}
+		body.Image = ref;
+	}
+	else if (api.request('GET', `/images/${body.Image}/json`).code == 404) {
+		step('pull', 'running');
+		const error = pull(body.Image);
+		if (error) finish('failed', error);
+		step('pull', 'done');
+	}
+	else step('pull', 'skipped');
+
+	const backup = name + BACKUP_SUFFIX;
+	if (inspect(backup)) finish('failed', 'A container named %s is left over from an earlier attempt. Delete it and try again.', [backup]);
+	if (new_name != name && inspect(new_name)) finish('failed', 'A container with this name already exists');
+
+	let renamed = false, created = null;
+	/* 失败：删掉新容器（不带 v，匿名卷仍属于旧容器）、改回名字、恢复原运行状态 */
+	function rollback(error, args) {
+		log('Rolling back: ' + (args ? sprintf(error, ...args) : error));
+		task.rollback = 'running';
+		save(true);
+		const problems = [];
+		if (created) {
+			const r = api.request('DELETE', `/containers/${created}`, { query: { force: true } });
+			if (r.code >= 300 && r.code != 404) push(problems, api.reason(r));
+		}
+		if (renamed) {
+			const r = api.request('POST', `/containers/${old.Id}/rename`, { query: { name: name } });
+			if (r.code >= 300) push(problems, api.reason(r));
+		}
+		if (was_running) {
+			const r = api.request('POST', `/containers/${old.Id}/start`);
+			if (r.code >= 300 && r.code != 304) push(problems, api.reason(r));
+		}
+		task.rollback = length(problems) ? 'failed' : 'done';
+		if (length(problems)) task.rollback_error = join('; ', problems);
+		log(task.rollback == 'done' ? `Restored ${name}` : 'Rollback incomplete: ' + task.rollback_error);
+		finish('failed', error, args);
+	}
+
+	step('stop', 'running');
+	if (was_running) {
+		log(`Stopping ${name}`);
+		const r = api.request('POST', `/containers/${old.Id}/stop`, { query: { t: 10 } });
+		if (r.code >= 300 && r.code != 304) finish('failed', api.reason(r));
+	}
+	const r1 = api.request('POST', `/containers/${old.Id}/rename`, { query: { name: backup } });
+	if (r1.code >= 300) {
+		if (was_running) api.request('POST', `/containers/${old.Id}/start`);
+		finish('failed', api.reason(r1));
+	}
+	renamed = true;
+	step('stop', 'done');
+
+	/* 新建时只带主网络（旧版 API 不接受多个），其余网络建好后再连接 */
+	step('create', 'running');
+	log(`Creating ${new_name}`);
+	const endpoints = body.NetworkingConfig?.EndpointsConfig || {};
+	const primary = body.HostConfig?.NetworkMode || 'bridge';
+	const first = {}, extra = {};
+	for (let net, cfg in endpoints) {
+		if (net == primary) first[net] = cfg;
+		else extra[net] = cfg;
+	}
+	body.NetworkingConfig = { EndpointsConfig: first };
+	const c = api.request('POST', '/containers/create', { query: { name: new_name }, body: body });
+	if (c.code >= 300 || !c.body?.Id) rollback(api.reason(c));
+	created = c.body.Id;
+	task.new_id = created;
+	for (let net, cfg in extra) {
+		const r = api.request('POST', `/networks/${net}/connect`, { body: { Container: created, EndpointConfig: cfg || {} } });
+		if (r.code >= 300) rollback(api.reason(r));
+	}
+	step('create', 'done');
+
+	if (was_running) {
+		step('start', 'running');
+		log(`Starting ${new_name}`);
+		const r = api.request('POST', `/containers/${created}/start`);
+		if (r.code >= 300 && r.code != 304) rollback(api.reason(r));
+		sleep(SETTLE);
+		const now = inspect(created);
+		if (!now?.State?.Running)
+			rollback('The new container stopped right after starting (exit code %d)', [now?.State?.ExitCode ?? -1]);
+		step('start', 'done');
+	}
+	else step('start', 'skipped');
+
+	/* 旧容器不带 v 删除：匿名卷已接到新容器上 */
+	step('cleanup', 'running');
+	const d = api.request('DELETE', `/containers/${old.Id}`, { query: { force: true } });
+	if (d.code >= 300 && d.code != 404) {
+		task.warning = api.reason(d);
+		log(`The previous container ${backup} could not be deleted: ${task.warning}`);
+	}
+	step('cleanup', 'done');
+	task.result = 'recreated';
+	finish('done');
+}
+
+/* ---- Compose ---- */
+
+function run_compose() {
+	const name = task.project, dir = `${COMPOSE_DIR}/${name}`, file = dir + '/compose.yaml';
+	const managed = !!access(file);
+	const host = api.cli_host();
+	const base = [];
+	/* 远程守护进程：经 env 设置 DOCKER_HOST，仍以参数数组执行 */
+	if (host) push(base, '/usr/bin/env', 'DOCKER_HOST=' + host);
+	push(base, COMPOSE, '--ansi', 'never', '--progress', 'plain', '-p', name);
+	if (managed) push(base, '--project-directory', dir, '-f', file);
+	const commands = {
+		up: [['up', '-d', '--remove-orphans']],
+		pull: [['pull'], ['up', '-d', '--remove-orphans']],
+		down: [['down', '--remove-orphans']],
+		remove: [['down', '--remove-orphans', ...(task.volumes ? ['-v'] : [])]],
+	}[task.action];
+	if (!commands || (!managed && task.action != 'down')) finish('failed', 'The project file is missing');
+	for (let i, args in commands) {
+		const s = task.steps[i].name;
+		step(s, 'running');
+		log('$ docker-compose ' + join(' ', args));
+		const rc = system([...base, ...args], 3600000);
+		if (rc != 0) finish('failed', 'docker-compose exited with code %d', [rc]);
+		step(s, 'done');
+	}
+	if (task.action == 'remove') {
+		step('files', 'running');
+		for (let f in lsdir(dir) || []) unlink(`${dir}/${f}`);
+		rmdir(dir);
+		step('files', 'done');
+	}
+	finish('done');
+}
+
+if (task.kind == 'pull') run_pull();
+else if (task.kind == 'recreate') run_recreate();
+else if (task.kind == 'compose') run_compose();
+finish('failed', 'Unknown task');

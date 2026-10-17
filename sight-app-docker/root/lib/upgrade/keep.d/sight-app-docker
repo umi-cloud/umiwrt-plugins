@@ -1,0 +1,2 @@
+# Compose 项目文件（Sight 的 Docker 页面保存）随系统升级保留
+/etc/sight-docker/

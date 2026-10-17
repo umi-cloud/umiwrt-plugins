@@ -6,7 +6,7 @@ UmiWrt 自维护的应用 feed。每个目录是一个 OpenWrt 包，连同它�
 |------|------|------------|
 | `sight-app-homeproxy/` | HomeProxy 后端（sing-box 客户端）与 Sight 页面，不含 LuCI 界面，不依赖 luci-base | [immortalwrt/homeproxy](https://github.com/immortalwrt/homeproxy) `master` `98a6ad9` |
 | `sight-app-ddns/` | DDNS 的 Sight 页面、权限与状态接口 `sight.ddns`（移植自 luci-app-ddns，Apache-2.0）；服务由 `ddns-scripts` 提供 | 页面原创；`sight.ddns` 取自 luci-app-ddns |
-| `sight-app-docker/` | Docker 的 Sight 页面、权限与引擎接口 `docker.*`（移植自 luci-app-dockerman 的 rpcd 后端，Apache-2.0），以及本包新增的 `sight.docker`（日志、后台拉取镜像）；引擎由 `dockerd` 提供，与 luci-app-dockerman 互斥 | 页面原创；`docker.*` 取自 luci-app-dockerman |
+| `sight-app-docker/` | Docker 的 Sight 页面、权限与引擎接口 `docker.*`（移植自 luci-app-dockerman 的 rpcd 后端，Apache-2.0），以及本包新增的 `sight.docker`：日志、后台任务（`pull_start` 下载镜像、`recreate_start` 更新/编辑时重建容器并在失败时恢复原容器、`compose_start` Compose 项目启停与更新，`task_status` 查询）、Compose 项目文件（`compose_list`/`compose_read`/`compose_write`，存 `/etc/sight-docker/compose/`）、一次性容器终端（`terminal_start`/`terminal_status`/`terminal_stop`，ttyd 只监听 LAN 侧地址）；装包时预置国内镜像加速（只做一次）。引擎由 `dockerd` 提供，终端依赖 `ttyd` 与 `docker`（CLI），Compose 依赖 `docker-compose`；与 luci-app-dockerman 互斥 | 页面原创；`docker.*` 取自 luci-app-dockerman |
 
 ## 使用
 

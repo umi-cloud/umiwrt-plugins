@@ -1,10 +1,10 @@
 {
 	"id": "docker",
 	"title": "Docker",
-	"description": "Run containers on the router: create, start and stop them, read their logs, download images and set a registry mirror.",
+	"description": "Run containers on the router: create, edit, update and open them, use a terminal, run Compose projects, manage images, networks and volumes, and set a registry mirror.",
 	"icon": "container",
 	"group": "applications",
-	"version": "1.2.0",
+	"version": "1.3.0",
 	"package": "sight-app-docker",
 	"changes": {
 		"dockerd": {

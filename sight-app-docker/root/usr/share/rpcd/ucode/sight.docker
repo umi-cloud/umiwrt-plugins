@@ -3,7 +3,8 @@
 // Docker 引擎接口（对象 docker、docker.container、docker.image 等），移植自 luci-app-dockerman 的
 // rpcd/ucode/docker_rpc.uc，使插件不依赖 luci-app-dockerman / luci-base：
 // luci.http 的 build_querystring 改为本文件内实现，luci.docker_socket 改为同样移植过来的 sight.docker_socket；
-// 去掉 ttyd_start（把参数直接拼进 shell 命令，且 ttyd 不是本包依赖）；文末另加 Sight 用的 sight.docker 对象（日志、后台拉取），其余保持原样。
+// 去掉 ttyd_start（把参数直接拼进 shell 命令）；文末另加 Sight 用的 sight.docker 对象（日志、后台任务、Compose 项目、
+// 一次性终端会话），其余保持原样。
 // Copyright 2025 Paul Donald / luci-lib-docker-js
 // Licensed to the public under the Apache License 2.0.
 // Built against the docker v1.47 API
@@ -15,6 +16,7 @@ import * as fs from 'fs';
 import * as socket from 'socket';
 import { cursor } from 'uci';
 import * as ds from 'sight.docker_socket';
+import * as ubus from 'ubus';
 
 // 与 luci.http 的 build_querystring 相同：'?k=v&k=v'，键值按需百分号编码
 function urlencode(value) {
@@ -405,14 +407,26 @@ const volume_methods = {
 /* ---- 以下为 Sight 增加的方法（对象 sight.docker），不属于上游 ---- */
 
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
+const FULL_ID = /^[a-f0-9]{64}$/;
+const NAME_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_.-]+$/;
+/* Compose 项目名：小写字母、数字、- 与 _，字母或数字开头（与 Compose 规范一致） */
+const PROJECT_PATTERN = /^[a-z0-9][a-z0-9_-]{0,62}$/;
 const LOG_LIMIT = 262144;
 /* 镜像引用：[仓库主机[:端口]/]路径[:标签 | @sha256:摘要]，只含字母数字与 . _ - : / @，不会被 shell 解释 */
 const IMAGE_PATTERN = /^([A-Za-z0-9.-]+(:[0-9]+)?\/)?[a-z0-9]+([._-]+[a-z0-9]+)*(\/[a-z0-9]+([._-]+[a-z0-9]+)*)*(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}|@sha256:[a-f0-9]{64})?$/;
-const PULL_DIR = '/tmp/sight-docker';
-const PULL_TASK = PULL_DIR + '/pull.json', PULL_LOCK = PULL_DIR + '/start.lock';
-const PULL_RUNNER = '/usr/libexec/sight-docker-pull';
+const TASK_DIR = '/tmp/sight-docker';
+const TASK = TASK_DIR + '/task.json', TASK_LOG = TASK_DIR + '/task.log', TASK_LOCK = TASK_DIR + '/start.lock';
+const TASK_RUNNER = '/usr/libexec/sight-docker-task';
+const OUTPUT_LIMIT = 16384;
 /* 后台任务刚起、尚未写入 pid 时的宽限（秒） */
 const SPAWN_GRACE = 30;
+const COMPOSE_DIR = '/etc/sight-docker/compose';
+const COMPOSE_BIN = '/usr/bin/docker-compose';
+const COMPOSE_LIMIT = 131072;
+const TERM_DIR = TASK_DIR + '/terminal';
+const TERM_RUNNER = '/usr/libexec/sight-docker-terminal';
+/* 终端会话的端口范围：每次随机取一个空闲的 */
+const TERM_PORT_FIRST = 7682, TERM_PORT_COUNT = 100;
 
 /* 日志多路复用流：每帧 8 字节头（[0] 流类型 0–2，[1..3] 为 0，[4..7] 大端长度）后接内容；
    容器开了 TTY 时为原始流，按帧解析失败即原样返回 */
@@ -446,43 +460,305 @@ function read_json(path) {
 	if (!s) return null;
 	try { return json(s); } catch { return null; }
 }
+function write_json(path, value) {
+	fs.writefile(path + '.tmp', sprintf('%J', value));
+	return fs.rename(path + '.tmp', path);
+}
+/* 任务与会话文件含容器配置与一次性路径，目录只给 root */
+function private_dir(path) {
+	fs.mkdir(path, 0700);
+	fs.chmod(path, 0700);
+}
 
-function pull_task() {
-	const t = read_json(PULL_TASK);
+/* ---- 后台任务：同一时间一个（拉取镜像、重建容器、Compose） ---- */
+
+function current_task() {
+	const t = read_json(TASK);
 	if (!t) return null;
 	if (t.state == 'running') {
 		const alive = t.pid ? fs.access(`/proc/${t.pid}`) : time() - t.started < SPAWN_GRACE;
-		if (!alive) { t.state = 'failed'; t.error = t.error || 'The pull task stopped unexpectedly'; }
+		if (!alive) { t.state = 'failed'; t.error = t.error || 'The task stopped unexpectedly'; }
 	}
 	return t;
 }
 
-/* 拉取镜像可能要几分钟，超过 rpcd 调用超时：交给后台脚本，进度写在 PULL_TASK，同一时间只跑一个 */
+/* 返回给页面的任务：去掉新建参数（可能很大，页面已有） */
+function public_task(t) {
+	if (!t) return null;
+	const out = {};
+	for (let k, v in t) if (k != 'body') out[k] = v;
+	return out;
+}
+
+/* 写入任务并启动后台脚本；命令行固定，参数由脚本从任务文件读取，输出写进任务日志 */
+function start_task(t) {
+	private_dir(TASK_DIR);
+	if (!fs.mkdir(TASK_LOCK)) return { error: 'busy' };
+	if (current_task()?.state == 'running') { fs.rmdir(TASK_LOCK); return { error: 'busy' }; }
+	t.state = 'running';
+	t.started = time();
+	t.steps = map(t.steps, (name) => ({ name: name, state: 'pending' }));
+	write_json(TASK, t);
+	fs.writefile(TASK_LOG, '');
+	system(`${TASK_RUNNER} </dev/null >>${TASK_LOG} 2>&1 &`);
+	fs.rmdir(TASK_LOCK);
+	return { task: public_task(t) };
+}
+
+function task_status() {
+	const t = current_task();
+	let output = fs.readfile(TASK_LOG) || '';
+	if (length(output) > OUTPUT_LIMIT) output = substr(output, length(output) - OUTPUT_LIMIT);
+	return { task: public_task(t), output: t ? output : '' };
+}
+
+/* 拉取镜像可能要几分钟，超过 rpcd 调用超时：交给后台任务 */
 function pull_start(request) {
 	const image = request.args?.image;
 	if (type(image) != 'string' || length(image) > 255 || !match(image, IMAGE_PATTERN))
 		return { error: 'invalid image' };
-	let from = image, tag = 'latest';
-	const at = index(image, '@'), colon = rindex(image, ':');
-	if (at >= 0) { from = substr(image, 0, at); tag = substr(image, at + 1); }
-	else if (colon > rindex(image, '/')) { from = substr(image, 0, colon); tag = substr(image, colon + 1); }
+	return start_task({ kind: 'pull', image: image, steps: ['pull'] });
+}
 
-	fs.mkdir(PULL_DIR);
-	if (!fs.mkdir(PULL_LOCK)) return { error: 'busy' };
-	if (pull_task()?.state == 'running') { fs.rmdir(PULL_LOCK); return { error: 'busy' }; }
-	const t = { image: image, from: from, tag: tag, state: 'running', started: time() };
-	fs.writefile(PULL_TASK + '.tmp', sprintf('%J', t));
-	fs.rename(PULL_TASK + '.tmp', PULL_TASK);
-	/* 命令行固定，引用由后台脚本从任务文件读取；输出全部重定向，避免 rpcd 等待后台进程 */
-	system(`${PULL_RUNNER} </dev/null >/dev/null 2>&1 &`);
-	fs.rmdir(PULL_LOCK);
-	return { task: t };
+/* 用新配置重建容器（更新镜像 mode=update，或修改配置 mode=edit）。body 为 docker.container.create 的参数，
+   与本插件已放行的 create 等权，由页面按 inspect 构造；镜像引用另行校验，因为后台会拉取它 */
+function recreate_start(request) {
+	const id = request.args?.id, mode = request.args?.mode, name = request.args?.name, body = request.args?.body;
+	if (type(id) != 'string' || !match(id, ID_PATTERN) || !(mode in ['update', 'edit']) || type(body) != 'object')
+		return { error: 'invalid' };
+	if (name != null && name != '' && (type(name) != 'string' || length(name) > 128 || !match(name, NAME_PATTERN)))
+		return { error: 'invalid' };
+	const r = call_docker('GET', `/containers/${id}/json`);
+	if (r.code == 404) return { error: 'not_found' };
+	if (r.code >= 300) return { code: r.code, error: r.body?.message || 'failed' };
+	const image = mode == 'update' ? r.body.Config?.Image : body.Image;
+	if (type(image) != 'string' || length(image) > 255 || !match(image, IMAGE_PATTERN))
+		return { error: 'invalid image' };
+	return start_task({ kind: 'recreate', mode: mode, id: r.body.Id, name: ltrim(r.body.Name, '/'), new_name: name || null,
+		image: image, body: body, steps: ['pull', 'stop', 'create', 'start', 'cleanup'] });
+}
+
+/* ---- Compose 项目：文件在 /etc/sight-docker/compose/<项目名>/compose.yaml ---- */
+
+const project_dir = (name) => `${COMPOSE_DIR}/${name}`;
+const valid_project = (name) => type(name) == 'string' && !!match(name, PROJECT_PATTERN);
+
+function compose_list() {
+	const out = [];
+	for (let name in fs.lsdir(COMPOSE_DIR) || []) {
+		if (!valid_project(name)) continue;
+		const st = fs.stat(`${project_dir(name)}/compose.yaml`);
+		if (st) push(out, { name: name, modified: st.mtime, size: st.size });
+	}
+	return { projects: sort(out, (a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0), available: !!fs.access(COMPOSE_BIN, 'x') };
+}
+
+function compose_read(request) {
+	const name = request.args?.name;
+	if (!valid_project(name)) return { error: 'invalid' };
+	const content = fs.readfile(`${project_dir(name)}/compose.yaml`);
+	return content == null ? { error: 'not_found' } : { content: content };
+}
+
+/* 保存项目文件：先写临时文件经 docker-compose config 校验，通过后原子替换；create 时不覆盖已有项目 */
+function compose_write(request) {
+	const name = request.args?.name, content = request.args?.content, create = !!request.args?.create;
+	if (!valid_project(name) || type(content) != 'string' || !length(trim(content)) || length(content) > COMPOSE_LIMIT)
+		return { error: 'invalid' };
+	if (!fs.access(COMPOSE_BIN, 'x')) return { error: 'not_installed' };
+	const dir = project_dir(name), file = dir + '/compose.yaml', tmp = dir + '/.compose.yaml.new';
+	const existed = !!fs.access(file);
+	if (create && existed) return { error: 'exists' };
+	if (!create && !existed) return { error: 'not_found' };
+	fs.mkdir('/etc/sight-docker', 0700);
+	fs.mkdir(COMPOSE_DIR, 0700);
+	fs.mkdir(dir, 0700);
+	if (!fs.writefile(tmp, content)) return { error: 'failed' };
+	const rc = system([COMPOSE_BIN, '--ansi', 'never', '-p', name, '--project-directory', dir, '-f', tmp, 'config', '--quiet'], 20000);
+	if (rc != 0) {
+		fs.unlink(tmp);
+		if (!existed) fs.rmdir(dir);
+		return { error: 'invalid_compose' };
+	}
+	fs.rename(tmp, file);
+	return { saved: true };
+}
+
+/* 启动 / 停止 / 拉取更新 / 删除项目（后台任务）；不是本页创建的项目（没有文件）只允许 down */
+function compose_start(request) {
+	const name = request.args?.name, action = request.args?.action, volumes = !!request.args?.volumes;
+	if (!valid_project(name) || !(action in ['up', 'pull', 'down', 'remove'])) return { error: 'invalid' };
+	if (!fs.access(COMPOSE_BIN, 'x')) return { error: 'not_installed' };
+	if (action != 'down' && !fs.access(`${project_dir(name)}/compose.yaml`)) return { error: 'not_found' };
+	const steps = { up: ['up'], pull: ['pull', 'up'], down: ['down'], remove: ['down', 'files'] }[action];
+	return start_task({ kind: 'compose', project: name, action: action, volumes: volumes, steps: steps });
+}
+
+/* ---- 容器终端：一次性的 ttyd 会话，只监听 LAN 侧地址 ---- */
+
+let bus = null;
+/* 可以绑定的本机地址：所属防火墙区域放行入站（input ACCEPT）且不做地址伪装的接口地址，另加回环 */
+function lan_addresses() {
+	const ctx = cursor();
+	const nets = {};
+	ctx.foreach('firewall', 'zone', (z) => {
+		if (z.input != 'ACCEPT' || z.masq == '1') return;
+		for (let n in (type(z.network) == 'array' ? z.network : split(z.network || '', /\s+/)))
+			if (n) nets[n] = true;
+	});
+	ctx.unload();
+	bus ??= ubus.connect();
+	const dump = bus?.call('network.interface', 'dump')?.interface || [];
+	const out = { v4: [], all: { '127.0.0.1': true, '::1': true }, lan: null };
+	for (let i in dump) {
+		if (!nets[i.interface] || !i.up) continue;
+		for (let a in i['ipv4-address'] || []) {
+			push(out.v4, a.address);
+			out.all[a.address] = true;
+			if (i.interface == 'lan') out.lan ??= a.address;
+		}
+		for (let a in i['ipv6-address'] || []) out.all[a.address] = true;
+		for (let p in i['ipv6-prefix-assignment'] || []) if (p['local-address']?.address) out.all[p['local-address'].address] = true;
+	}
+	return out;
+}
+
+/* 浏览器访问 Sight 用的地址：是 LAN 侧地址就绑定它；是主机名则绑定 lan 接口的 IPv4；其它（如 WAN 地址）拒绝 */
+function bind_address(host) {
+	if (type(host) != 'string' || length(host) > 255) return null;
+	host = trim(host, '[]');
+	const lan = lan_addresses();
+	if (lan.all[host]) return host;
+	if (match(host, /^[0-9.]+$/) || index(host, ':') >= 0) return null;
+	if (!match(host, /^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$/)) return null;
+	return lan.lan ?? lan.v4[0];
+}
+
+function used_ports() {
+	const used = {};
+	for (let f in ['/proc/net/tcp', '/proc/net/tcp6'])
+		for (let line in split(fs.readfile(f) || '', '\n')) {
+			const m = match(line, /^\s*\d+:\s+[0-9A-F]+:([0-9A-F]{4})\s/);
+			if (m) used[int(m[1], 16)] = true;
+		}
+	return used;
+}
+
+function random_hex(bytes) {
+	const raw = fs.readfile('/dev/urandom', bytes);
+	return length(raw) == bytes ? hexenc(raw) : null;
+}
+
+/* 会话文件；runner 已退出（或启动失败）的会话视为结束 */
+function term_session(id) {
+	const s = read_json(`${TERM_DIR}/${id}.json`) || read_json(`${TERM_DIR}/queue/${id}.json`);
+	if (!s) return null;
+	if (s.state != 'ended') {
+		const alive = s.pid ? fs.access(`/proc/${s.pid}`) : time() - s.created < SPAWN_GRACE;
+		if (!alive) { s.state = 'ended'; s.reason ??= 'failed'; }
+	}
+	return s;
+}
+/* 给页面的会话：一次性路径只在启动时返回 */
+function public_session(s, secret) {
+	if (!s) return null;
+	const out = { id: s.id, port: s.port, tls: s.tls, state: s.state, connected: s.connected || null, created: s.created, reason: s.reason || null, timeout: 60 };
+	if (secret) out.path = s.base + '/';
+	return out;
+}
+
+function running_container(id) {
+	if (type(id) != 'string' || !match(id, ID_PATTERN)) return { error: 'invalid' };
+	const r = call_docker('GET', `/containers/${id}/json`);
+	if (r.code == 404) return { error: 'not_found' };
+	if (r.code >= 300) return { error: r.body?.message || 'failed' };
+	if (!match(r.body?.Id, FULL_ID)) return { error: 'failed' };
+	if (!r.body.State?.Running) return { error: 'not_running' };
+	return { container: r.body };
+}
+
+/* 只结束自己启动的 ttyd：核对进程命令行里的一次性路径 */
+function terminal_kill(s) {
+	if (!s?.pid) return false;
+	const cmdline = fs.readfile(`/proc/${s.pid}/cmdline`) || '';
+	if (index(cmdline, '/usr/bin/ttyd\0') != 0 || index(cmdline, '\0' + s.base + '\0') < 0) return false;
+	return system(['kill', '' + s.pid]) == 0;
+}
+
+function terminal_start(request) {
+	const tls = !!request.args?.tls;
+	if (!fs.access('/usr/bin/ttyd', 'x') || !fs.access('/usr/bin/docker', 'x')) return { error: 'not_installed' };
+	const c = running_container(request.args?.id);
+	if (c.error) return c;
+	const id = c.container.Id, name = ltrim(c.container.Name, '/');
+	const bind = bind_address(request.args?.host);
+	if (!bind) return { error: 'not_lan' };
+	let cert = null, key = null;
+	if (tls) {
+		const ctx = cursor();
+		cert = ctx.get('uhttpd', 'main', 'cert') || '/etc/uhttpd.crt';
+		key = ctx.get('uhttpd', 'main', 'key') || '/etc/uhttpd.key';
+		ctx.unload();
+		if (!fs.access(cert) || !fs.access(key)) return { error: 'no_certificate' };
+	}
+	private_dir(TASK_DIR);
+	private_dir(TERM_DIR);
+	private_dir(TERM_DIR + '/queue');
+	if (!fs.mkdir(TERM_DIR + '/start.lock')) return { error: 'busy' };
+	const done = (r) => { fs.rmdir(TERM_DIR + '/start.lock'); return r; };
+	/* 同一容器同时只一个会话：还没有人连上的会话直接复用，已连上的需先结束 */
+	const old = term_session(id);
+	if (old && old.state != 'ended') {
+		if (old.connected) return done({ error: 'in_use', session: public_session(old) });
+		if (old.bind == bind && old.tls == tls) return done({ session: public_session(old, true) });
+		terminal_kill(old);
+	}
+	const used = used_ports();
+	for (let f in fs.glob(TERM_DIR + '/*.json')) { const s = read_json(f); if (s?.port) used[s.port] = true; }
+	const free = [];
+	for (let p = TERM_PORT_FIRST; p < TERM_PORT_FIRST + TERM_PORT_COUNT; p++) if (!used[p]) push(free, p);
+	const secret = random_hex(16), pick = random_hex(2);
+	if (!length(free) || !secret || !pick) return done({ error: 'failed' });
+	const s = { id: id, name: name, port: free[int(pick, 16) % length(free)], bind: bind, base: '/' + secret, tls: tls, cert: cert, key: key, created: time() };
+	fs.unlink(`${TERM_DIR}/${id}.json`);
+	write_json(`${TERM_DIR}/queue/${id}.json`, s);
+	system(`${TERM_RUNNER} </dev/null >/dev/null 2>&1 &`);
+	s.state = 'starting';
+	return done({ session: public_session(s, true) });
+}
+
+function terminal_status(request) {
+	const id = request.args?.id;
+	if (type(id) != 'string' || !match(id, ID_PATTERN)) return { error: 'invalid' };
+	let full = id;
+	if (!match(id, FULL_ID)) {
+		const r = call_docker('GET', `/containers/${id}/json`);
+		if (r.code >= 300) return { session: null };
+		full = r.body.Id;
+	}
+	return { session: public_session(term_session(full)) };
+}
+
+function terminal_stop(request) {
+	const id = request.args?.id;
+	if (type(id) != 'string' || !match(id, FULL_ID)) return { error: 'invalid' };
+	const s = term_session(id);
+	if (!s || s.state == 'ended') return { stopped: false };
+	return { stopped: terminal_kill(s) };
 }
 
 const sight_methods = {
-	logs:        { args: { id: '', tail: 200 }, call: container_logs },
-	pull_start:  { args: { image: '' }, call: pull_start },
-	pull_status: { args: {}, call: () => ({ task: pull_task() }) },
+	logs:            { args: { id: '', tail: 200 }, call: container_logs },
+	task_status:     { args: {}, call: task_status },
+	pull_start:      { args: { image: '' }, call: pull_start },
+	recreate_start:  { args: { id: '', mode: '', name: '', body: {} }, call: recreate_start },
+	compose_list:    { args: {}, call: compose_list },
+	compose_read:    { args: { name: '' }, call: compose_read },
+	compose_write:   { args: { name: '', content: '', create: false }, call: compose_write },
+	compose_start:   { args: { name: '', action: '', volumes: false }, call: compose_start },
+	terminal_start:  { args: { id: '', host: '', tls: false }, call: terminal_start },
+	terminal_status: { args: { id: '' }, call: terminal_status },
+	terminal_stop:   { args: { id: '' }, call: terminal_stop },
 };
 
 const methods = {

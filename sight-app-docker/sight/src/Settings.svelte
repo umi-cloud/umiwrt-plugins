@@ -1,7 +1,7 @@
 <script>
 	import { onDestroy, tick } from 'svelte';
 	import { t, errorText, useEditor, activity, pending, saveFlow, Button, Callout, Card, Dialog, DynamicList, ErrorSummary, Feedback, FormActions, Input, SettingRow, SettingsGroup } from '@sight/sdk';
-	import { validateSettings, pendingRestart, sameDir, DEFAULT_DATA_ROOT } from './service.js';
+	import { validateSettings, pendingRestart, sameDir, DEFAULT_DATA_ROOT, MIRROR_PRESETS } from './service.js';
 
 	/* Docker 设置（dockerd 的 uci globals 段）：镜像加速与数据目录。保存即生效：写入会话暂存后带回滚应用，
 	   dockerd 的 reload 重读镜像加速，但不换数据目录、也不清掉全部删除的加速地址；运行值与配置不一致时提示重启。 */
@@ -39,8 +39,17 @@
 		: t('Docker is still using the previous registry mirrors. Restart Docker to apply the change.'));
 	const fieldError = id => errors.filter(e => e.field === id).map(e => e.text).join(' ');
 
+	/* 国内镜像加速：未配置时一键填入预设并保存（同样走暂存 + 保存即生效）；已有地址时可逐个加入 */
+	const presetsMissing = $derived(draft ? MIRROR_PRESETS.filter(m => !draft.mirrors.includes(m.url)) : []);
+	function addPreset(url) { if (!locked && !draft.mirrors.includes(url)) draft.mirrors = [...draft.mirrors, url]; }
+	function usePresets() {
+		if (!draft || locked) return;
+		draft.mirrors = [...draft.mirrors, ...presetsMissing.map(m => m.url)];
+		save();
+	}
+
 	async function save(e) {
-		e.preventDefault();
+		e?.preventDefault();
 		if (!draft || locked) return;
 		if (mirrorDraft.trim()) { draft.mirrors = [...draft.mirrors, mirrorDraft.trim()]; mirrorDraft = ''; }
 		errors = validateSettings(draft).map(x => ({ text: t(x.message), field: `docker-${x.field}` }));
@@ -94,9 +103,23 @@
 				</Callout>
 			{/if}
 			{#if restartError}<Feedback tone="error" message={restartError} compact />{/if}
+			{#if !base.mirrors.length && !draft.mirrors.length}
+				<Callout tone="warning" message={t('No registry mirror is set. In mainland China, downloads from Docker Hub are often slow or fail.')} data-mirror-suggest>
+					<Button size="compact" variant="primary" disabled={locked} onclick={usePresets} data-action="use-mirrors">{t('Use mirrors in China')}</Button>
+				</Callout>
+			{/if}
 			<SettingsGroup title={t('Downloads')}>
 				<SettingRow id="docker-mirrors" label={t('Registry mirrors')} description={t('Images from Docker Hub are downloaded through these addresses first. Takes effect without restarting containers.')} error={fieldError('docker-mirrors')}>
-					<DynamicList id="docker-mirrors" bind:values={draft.mirrors} bind:draft={mirrorDraft} disabled={locked} placeholder="https://mirror.example.com" spellcheck="false" autocomplete="off" aria-label={t('Registry mirrors')} />
+					<div class="mirrors">
+						<DynamicList id="docker-mirrors" bind:values={draft.mirrors} bind:draft={mirrorDraft} disabled={locked} placeholder="https://mirror.example.com" spellcheck="false" autocomplete="off" aria-label={t('Registry mirrors')} />
+						{#if presetsMissing.length}
+							<div class="presets" data-mirror-presets>
+								<span class="muted">{t('Suggested in China:')}</span>
+								{#each presetsMissing as m}<Button size="compact" disabled={locked} title={m.url} onclick={() => addPreset(m.url)}>{t('Add %s (%s)', m.url.replace(/^https:\/\//, ''), m.source)}</Button>{/each}
+							</div>
+						{/if}
+						<p class="muted">{t('Public mirrors are run by third parties and may stop working at any time. If downloads fail, try another mirror or remove them.')}</p>
+					</div>
 				</SettingRow>
 			</SettingsGroup>
 			<SettingsGroup title={t('Storage')}>
@@ -115,4 +138,7 @@
 
 <style lang="less">
 	.form { display: flex; flex-direction: column; gap: var(--sp-5); }
+	.mirrors { display: flex; flex-direction: column; gap: var(--sp-2); }
+	.presets { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); }
+	.muted { margin: 0; color: var(--text-muted); font-size: var(--fs-xs); }
 </style>

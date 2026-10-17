@@ -1,0 +1,20 @@
+#!/bin/sh
+# 首次安装时预置国内镜像加速：只在 registry_mirrors 从未设置过时写入。
+# 标记 dockerd.globals.sight_mirrors_seeded 保证只做一次，用户删光加速地址后不会再被加回来（dockerd 不读这一项）。
+# 地址与页面「设置」里的预设一致（sight/src/service.js 的 MIRROR_PRESETS）。
+
+uci -q get dockerd.globals >/dev/null || exit 0
+[ "$(uci -q get dockerd.globals.sight_mirrors_seeded)" = 1 ] && exit 0
+
+seeded=0
+if [ -z "$(uci -q get dockerd.globals.registry_mirrors)" ]; then
+	uci add_list dockerd.globals.registry_mirrors='https://docker.1ms.run'
+	uci add_list dockerd.globals.registry_mirrors='https://docker.m.daocloud.io'
+	seeded=1
+fi
+uci set dockerd.globals.sight_mirrors_seeded=1
+uci commit dockerd
+
+# 正在运行的 dockerd 经 reload 重读加速地址，不重启容器
+[ "$seeded" = 1 ] && /etc/init.d/dockerd running 2>/dev/null && /etc/init.d/dockerd reload >/dev/null 2>&1
+exit 0

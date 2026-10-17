@@ -1,6 +1,6 @@
 {
 	"sight-plugin-docker": {
-		"description": "Sight Docker page: containers (create, start/stop/restart, delete, restart policy, usage, logs), image download, removal and cleanup, dockerd settings",
+		"description": "Sight Docker page: containers (create, edit and update by recreating, start/stop/restart, delete, restart policy, usage, logs, terminal), images, networks, volumes, Compose projects, dockerd settings",
 		"read": {
 			"ubus": {
 				"docker": [
@@ -14,14 +14,21 @@
 					"stats"
 				],
 				"docker.image": [
+					"inspect",
 					"list"
 				],
 				"docker.network": [
 					"list"
 				],
+				"docker.volume": [
+					"list"
+				],
 				"sight.docker": [
+					"compose_list",
+					"compose_read",
 					"logs",
-					"pull_status"
+					"task_status",
+					"terminal_status"
 				]
 			},
 			"uci": [
@@ -42,8 +49,22 @@
 					"prune",
 					"remove"
 				],
+				"docker.network": [
+					"create",
+					"remove"
+				],
+				"docker.volume": [
+					"create",
+					"prune",
+					"remove"
+				],
 				"sight.docker": [
-					"pull_start"
+					"compose_start",
+					"compose_write",
+					"pull_start",
+					"recreate_start",
+					"terminal_start",
+					"terminal_stop"
 				]
 			},
 			"uci": [

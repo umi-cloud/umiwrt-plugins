@@ -1,15 +1,17 @@
 <script>
-	import { onMount, onDestroy, tick } from 'svelte';
+	import { onDestroy, tick } from 'svelte';
 	import { t, errorText, useEditor, Button, Checkbox, Disclosure, DynamicList, ErrorSummary, Field, FormActions, FormSection, Icon, Input, RadioGroup, Select } from '@sight/sdk';
 	import { emptyCreate, validateCreate, createImage, pullPercent, RESTART_POLICIES } from './service.js';
 	import { policyLabel } from './format.js';
 
 	/* 新建容器（抽屉正文）：选镜像（本机已有，或填写后先下载）→ 名称 → 网络与端口 → 目录 → 环境变量 → 重启策略；
-	   命令与特权模式收进「高级」。镜像不在本机时先经页面的后台拉取任务下载，完成后再创建。 */
-	let { svc, images = [], names = [], pullTask = null, pull, oncancel, oncreated } = $props();
-	const tags = $derived(images.flatMap(i => i.tags));
+	   命令与特权模式收进「高级」。镜像不在本机时先经页面的后台拉取任务下载，完成后再创建。
+	   edit（{ form, name }）时为修改已有容器：表单预填，保存交给 onedit 走设备端的重建任务，表单不管理的配置原样保留。 */
+	let { svc, images = [], names = [], networks = [], pullTask = null, pull, oncancel, oncreated, edit = null, onedit } = $props();
+	const tags = $derived([...new Set([...images.flatMap(i => i.tags), ...(edit?.form.image ? [edit.form.image] : [])])]);
 	/* 本机没有镜像时直接从「下载」开始 */
 	function initial() {
+		if (edit) return JSON.parse(JSON.stringify(edit.form));
 		const f = emptyCreate(), first = images.flatMap(i => i.tags)[0];
 		if (first) f.image = first; else f.source = 'pull';
 		return f;
@@ -17,7 +19,8 @@
 	const form = $state(initial());
 	const baseline = JSON.stringify(form);
 	let envDraft = $state('');
-	let networks = $state([]);
+	/* 当前网络不在列表里（如 none、共用其他容器的网络）时也列出，避免编辑时被改掉 */
+	const extraNetwork = $derived(edit && !['bridge', 'host', ...networks].includes(edit.form.network) ? edit.form.network : '');
 	let errors = $state([]);
 	let errorSummary = $state();
 	let busy = $state(false);
@@ -27,8 +30,6 @@
 	const dirty = $derived(JSON.stringify(form) !== baseline || !!envDraft.trim());
 	useEditor(() => ({ dirty, busy }));
 
-	onMount(() => { svc.networks().then(list => { if (alive) networks = list; }).catch(() => { /* 只列内置网络 */ }); });
-
 	const fieldError = id => errors.filter(e => e.field === id).map(e => e.text).join(' ');
 	const addPort = () => form.ports.push({ host: '', container: '', proto: 'tcp' });
 	const addMount = () => form.mounts.push({ host: '', container: '', readonly: false });
@@ -37,11 +38,19 @@
 		e.preventDefault();
 		if (busy) return;
 		if (envDraft.trim()) { form.env = [...form.env, envDraft.trim()]; envDraft = ''; }
-		errors = validateCreate(form, names).map(x => ({ text: t(x.message), field: `create-${x.field}` }));
+		errors = validateCreate(form, edit ? names.filter(n => n !== edit.name) : names).map(x => ({ text: t(x.message), field: `create-${x.field}` }));
 		if (errors.length) { await tick(); errorSummary?.focus(); return; }
 		const submitted = $state.snapshot(form);
 		const image = createImage(submitted);
 		busy = true;
+		if (edit) {
+			/* 下载（如需要）与重建都在设备端任务里完成 */
+			phase = 'create';
+			try { await onedit(submitted); }
+			catch (err) { if (alive) { errors = [{ text: errorText(err) }]; await tick(); errorSummary?.focus(); } }
+			finally { if (alive) { busy = false; phase = ''; } }
+			return;
+		}
 		try {
 			if (!tags.includes(image)) {
 				phase = 'pull';
@@ -62,14 +71,15 @@
 
 	/* 进度显示在吸底的操作栏里 */
 	const progress = $derived.by(() => {
-		if (phase === 'create') return t('Creating…');
+		if (phase === 'create') return edit ? t('Starting…') : t('Creating…');
+		if (edit) return t('Saving recreates the container with these settings. It stops briefly; volumes and folders are kept.');
 		if (phase !== 'pull') return '';
 		const p = pullTask?.state === 'running' ? pullPercent(pullTask) : null;
 		return t('Downloading %s… %s', createImage(form), p == null ? '' : `${p}%`);
 	});
 </script>
 
-<form class="form" onsubmit={submit} aria-label={t('New container')} data-create-form>
+<form class="form" onsubmit={submit} aria-label={edit ? t('Edit container') : t('New container')} data-create-form={edit ? 'edit' : 'create'}>
 	<ErrorSummary {errors} bind:this={errorSummary} />
 
 	<FormSection title={t('Image')}>
@@ -104,6 +114,7 @@
 					<option value="bridge">{t('Default (separate address, publish ports below)')}</option>
 					<option value="host">{t('Same as the device (no port mapping needed)')}</option>
 					{#each networks as n}<option value={n}>{n}</option>{/each}
+					{#if extraNetwork}<option value={extraNetwork}>{extraNetwork}</option>{/if}
 				</Select>
 			</Field>
 			{#if form.network === 'host'}
@@ -165,9 +176,9 @@
 		</div>
 	</Disclosure>
 
-	<Checkbox bind:checked={form.start} disabled={busy}>{t('Start the container after creating it')}</Checkbox>
+	{#if !edit}<Checkbox bind:checked={form.start} disabled={busy}>{t('Start the container after creating it')}</Checkbox>{/if}
 
-	<FormActions {busy} {oncancel} saveLabel={t('Create')} description={progress} />
+	<FormActions {busy} {oncancel} saveLabel={edit ? t('Save and recreate') : t('Create')} description={progress} />
 </form>
 
 <style lang="less">

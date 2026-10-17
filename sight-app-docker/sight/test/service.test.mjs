@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { unwrap, formatPorts, shape, createDocker, DockerError, isImageRef, normalizeImage, splitCommand, emptyCreate, validateCreate, buildCreate, cpuPercent, memoryUsage, detailOf, pullPercent, settingsOf, validateSettings, settingsPlan, sameDir, pendingRestart } from '../src/service.js';
+import { unwrap, formatPorts, shape, createDocker, DockerError, isImageRef, normalizeImage, splitCommand, emptyCreate, validateCreate, buildCreate, cpuPercent, memoryUsage, detailOf, pullPercent, settingsOf, validateSettings, settingsPlan, sameDir, pendingRestart,
+	portLinks, groupContainers, projectsOf, isProjectName, validateProject, networksOf, volumesOf, validateNetwork, buildNetwork, canUpdate, replyError, MIRROR_PRESETS } from '../src/service.js';
 
 test('插件响应：code ≥ 300 抛出 body.message，否则返回 body', () => {
 	assert.deepEqual(unwrap({ code: 200, body: [1] }), [1]);
@@ -77,7 +78,7 @@ test('资源占用：CPU 取两次采样之差按核数折算，内存扣除 ina
 
 test('详情与拉取进度整形', () => {
 	assert.deepEqual(detailOf({ HostConfig: { RestartPolicy: { Name: '' }, NetworkMode: 'bridge' }, Mounts: [{ Type: 'bind', Source: '/mnt/a', Destination: '/a', RW: false }, { Type: 'volume', Name: 'v1', Source: '/x/_data', Destination: '/b', RW: true }] }),
-		{ restart: 'no', network: 'bridge', mounts: [{ type: 'bind', source: '/mnt/a', destination: '/a', readonly: true }, { type: 'volume', source: 'v1', destination: '/b', readonly: false }] });
+		{ imageRef: '', restart: 'no', network: 'bridge', mounts: [{ type: 'bind', source: '/mnt/a', destination: '/a', readonly: true }, { type: 'volume', source: 'v1', destination: '/b', readonly: false }] });
 	assert.equal(pullPercent({ current: 50, total: 200 }), 25);
 	assert.equal(pullPercent({ current: 0, total: 0 }), null);
 });
@@ -119,7 +120,7 @@ test('服务：删除容器、重启策略、清理镜像、日志与拉取的�
 	assert.deepEqual(await svc.pullStart('busybox'), { image: 'busybox:latest', state: 'running' });
 	assert.deepEqual(calls.at(-1), ['sight.docker', 'pull_start', { image: 'busybox:latest' }]);
 	replies['sight.docker.pull_start'] = { error: 'busy' };
-	await assert.rejects(svc.pullStart('busybox'), /Another image is being downloaded/);
+	await assert.rejects(svc.pullStart('busybox'), e => e.reason === 'busy' && /Another task is running/.test(e.message));
 	/* 建好但启动失败：错误带上已建容器的 ID */
 	await assert.rejects(svc.create({ ...emptyCreate(), image: 'busybox:stable' }), e => e.created === 'c1' && /already allocated/.test(e.message));
 	await assert.rejects(svc.action(id, 'remove'), /Unknown action/);
@@ -143,4 +144,133 @@ test('设置：运行值与配置不一致时提示重启（数据目录；镜�
 	/* 未设置 data_root 时按 init 脚本缺省 /opt/docker/ 比较 */
 	assert.deepEqual(pendingRestart({ dataRoot: '', mirrors: [] }, { root: '/opt/docker', mirrors: [] }), []);
 	assert.deepEqual(pendingRestart({ dataRoot: '', mirrors: [] }, { root: '', mirrors: undefined }), []);
+});
+
+test('打开网页：发布到设备的 TCP 端口，主机名取浏览器访问路由器时的；443/8443 用 https，回环与 UDP 不列', () => {
+	const ports = [{ IP: '0.0.0.0', PrivatePort: 80, PublicPort: 8080, Type: 'tcp' }, { IP: '::', PrivatePort: 80, PublicPort: 8080, Type: 'tcp' },
+		{ IP: '0.0.0.0', PrivatePort: 443, PublicPort: 8443, Type: 'tcp' }, { IP: '0.0.0.0', PrivatePort: 443, PublicPort: 443, Type: 'tcp' },
+		{ IP: '127.0.0.1', PrivatePort: 9000, PublicPort: 9000, Type: 'tcp' }, { IP: '0.0.0.0', PrivatePort: 53, PublicPort: 53, Type: 'udp' }, { PrivatePort: 81, Type: 'tcp' },
+		{ IP: '0.0.0.0', PrivatePort: 80, PublicPort: 80, Type: 'tcp' }];
+	assert.deepEqual(portLinks(ports, '192.168.1.1'), [
+		{ port: 80, url: 'http://192.168.1.1/' }, { port: 443, url: 'https://192.168.1.1/' }, { port: 8080, url: 'http://192.168.1.1:8080/' }, { port: 8443, url: 'https://192.168.1.1:8443/' }]);
+	assert.equal(portLinks(ports.slice(0, 1), '[fd00::1]')[0].url, 'http://[fd00::1]:8080/');
+	assert.equal(portLinks(ports.slice(0, 1), 'fd00::1')[0].url, 'http://[fd00::1]:8080/');
+	assert.deepEqual(portLinks([], 'router.lan'), []);
+});
+
+const container = (name, extra = {}) => ({ Id: name.padEnd(64, '0'), Names: ['/' + name], Image: 'busybox', ImageID: 'i', State: 'running', Status: 'Up', Ports: [], Labels: {}, NetworkSettings: { Networks: { bridge: {} } }, Mounts: [], ...extra });
+
+test('Compose：按项目标签归组；本页保存的项目与别处创建的合并，统计运行状态', () => {
+	const { containers } = shape([
+		container('solo'),
+		container('app-web-1', { Labels: { 'com.docker.compose.project': 'app', 'com.docker.compose.service': 'web' } }),
+		container('app-db-1', { State: 'exited', Labels: { 'com.docker.compose.project': 'app', 'com.docker.compose.service': 'db' } }),
+		container('cli-x-1', { Labels: { 'com.docker.compose.project': 'cli', 'com.docker.compose.project.working_dir': '/root/cli' } }),
+	], []);
+	const g = groupContainers(containers);
+	assert.deepEqual(g.standalone.map(c => c.name), ['solo']);
+	assert.deepEqual(g.projects.map(p => [p.name, p.containers.map(c => c.service)]), [['app', ['web', 'db']], ['cli', ['']]]);
+	const projects = projectsOf([{ name: 'app', modified: 1 }, { name: 'empty', modified: 2 }], containers);
+	assert.deepEqual(projects.map(p => [p.name, p.managed, p.state, p.running, p.containers.length]),
+		[['app', true, 'partial', 1, 2], ['cli', false, 'running', 1, 1], ['empty', true, 'empty', 0, 0]]);
+	assert.equal(projects[1].workingDir, '/root/cli');
+});
+
+test('Compose：项目名与文件校验', () => {
+	for (const ok of ['app', 'my-app_2', '0x']) assert.ok(isProjectName(ok), ok);
+	for (const bad of ['', 'App', '-x', 'a b', 'a/b', '../x', 'x'.repeat(64), 'a;id']) assert.ok(!isProjectName(bad), bad);
+	const yaml = 'services:\n  web:\n    image: busybox\n';
+	assert.deepEqual(validateProject({ name: 'app', content: yaml }), []);
+	assert.deepEqual(validateProject({ name: 'App', content: '' }).map(e => e.field), ['name', 'content']);
+	assert.deepEqual(validateProject({ name: 'app', content: yaml }, ['app']).map(e => e.message), ['A project with this name already exists']);
+	assert.deepEqual(validateProject({ name: 'app', content: 'version: 3' }).map(e => e.field), ['content']);
+	assert.deepEqual(validateProject({ name: '', content: yaml }, [], false), [], '编辑已有项目时不校验名称');
+	assert.deepEqual(validateProject({ name: 'app', content: 'services:\n' + 'x'.repeat(131072) }).map(e => e.message), ['The file is larger than 128 KB']);
+});
+
+test('网络与卷：连接的容器与使用者取自容器列表，卷大小取自 system/df', () => {
+	const { containers } = shape([
+		container('web', { NetworkSettings: { Networks: { appnet: {}, bridge: {} } }, Mounts: [{ Type: 'volume', Name: 'data' }, { Type: 'bind', Source: '/x' }] }),
+		container('job', { State: 'exited', NetworkSettings: { Networks: { appnet: {} } } }),
+	], []);
+	const nets = networksOf([
+		{ Id: 'n1', Name: 'appnet', Driver: 'bridge', Scope: 'local', IPAM: { Config: [{ Subnet: '172.30.0.0/16', Gateway: '172.30.0.1' }] }, Labels: { 'com.docker.compose.project': 'app' } },
+		{ Id: 'n0', Name: 'bridge', Driver: 'bridge', Scope: 'local', IPAM: { Config: [{ Subnet: '172.17.0.0/16' }] } },
+		{ Id: 'n2', Name: 'host', Driver: 'host', Scope: 'local', IPAM: { Config: [] } },
+	], containers);
+	assert.deepEqual(nets.map(n => [n.name, n.builtin, n.containers]), [['bridge', true, ['web']], ['host', true, []], ['appnet', false, ['job', 'web']]]);
+	assert.deepEqual([nets[2].subnets, nets[2].gateways, nets[2].project], [['172.30.0.0/16'], ['172.30.0.1'], 'app']);
+	const vols = volumesOf({ Volumes: [
+		{ Name: 'f'.repeat(64), Driver: 'local', Labels: { 'com.docker.volume.anonymous': '' }, CreatedAt: '2026-10-16T08:00:00Z' },
+		{ Name: 'data', Driver: 'local', Labels: null, Mountpoint: '/opt/docker/volumes/data/_data' },
+	] }, { Volumes: [{ Name: 'data', UsageData: { Size: 4096, RefCount: 1 } }, { Name: 'f'.repeat(64), UsageData: { Size: -1 } }] }, containers);
+	assert.deepEqual(vols.map(v => [v.name.slice(0, 4), v.anonymous, v.size, v.containers]), [['data', false, 4096, ['web']], ['ffff', true, null, []]]);
+	assert.equal(vols[1].created, Date.parse('2026-10-16T08:00:00Z') / 1000);
+	assert.deepEqual(volumesOf({ Volumes: null }, null, []), []);
+});
+
+test('新建网络：名称、子网与网关校验，表单 → create 参数', () => {
+	const form = { name: 'appnet', subnet: '', gateway: '', internal: false };
+	assert.deepEqual(validateNetwork(form, ['bridge']), []);
+	assert.deepEqual(validateNetwork({ ...form, name: 'bridge' }, ['bridge']).map(e => e.field), ['name']);
+	assert.deepEqual(validateNetwork({ ...form, subnet: '172.30.0.0', gateway: 'x' }).map(e => e.field), ['subnet', 'gateway']);
+	assert.deepEqual(validateNetwork({ ...form, gateway: '172.30.0.1' }).map(e => e.message), ['Set the subnet together with the gateway']);
+	assert.deepEqual(buildNetwork(form), { Name: 'appnet', Driver: 'bridge', CheckDuplicate: true });
+	assert.deepEqual(buildNetwork({ name: ' n ', subnet: '172.30.0.0/16', gateway: '172.30.0.1', internal: true }),
+		{ Name: 'n', Driver: 'bridge', CheckDuplicate: true, IPAM: { Driver: 'default', Config: [{ Subnet: '172.30.0.0/16', Gateway: '172.30.0.1' }] }, Internal: true });
+});
+
+test('更新与错误码：只有带标签的镜像引用能找新版；设备端错误码转成说明', () => {
+	assert.ok(canUpdate('nginx') && canUpdate('ghcr.io/a/b:v1'));
+	assert.ok(!canUpdate(`sha256:${'a'.repeat(64)}`) && !canUpdate(`nginx@sha256:${'a'.repeat(64)}`) && !canUpdate(''));
+	assert.equal(replyError({ task: {} }), null);
+	const e = replyError({ error: 'not_lan' });
+	assert.equal(e.reason, 'not_lan');
+	assert.match(e.message, /LAN address/);
+	assert.equal(replyError({ error: 'weird' }).message, 'weird');
+	assert.ok(MIRROR_PRESETS.length >= 1 && MIRROR_PRESETS.every(m => /^https:\/\/[a-z0-9.-]+$/.test(m.url) && m.source));
+	assert.deepEqual(validateSettings({ mirrors: MIRROR_PRESETS.map(m => m.url), dataRoot: '' }), []);
+});
+
+test('服务：更新、编辑、Compose、网络/卷与终端的调用参数', async () => {
+	const calls = [];
+	const c = { Id: 'a'.repeat(64), Name: '/web', Image: 'sha256:old', Config: { Image: 'busybox:stable', Env: ['A=1'], Hostname: 'aaaaaaaaaaaa' }, HostConfig: { NetworkMode: 'bridge', RestartPolicy: { Name: 'no' } }, Mounts: [], NetworkSettings: { Networks: { bridge: {} } } };
+	const replies = {
+		'docker.container.inspect': { code: 200, body: c },
+		'docker.image.inspect': { code: 200, body: { Config: { Env: [] } } },
+		'sight.docker.recreate_start': { task: { kind: 'recreate', state: 'running' } },
+		'sight.docker.compose_start': { task: { kind: 'compose', state: 'running' } },
+		'sight.docker.compose_write': { error: 'invalid_compose' },
+		'sight.docker.terminal_start': { session: { port: 7700, path: '/0123456789abcdef0123456789abcdef/', tls: false } },
+		'docker.volume.prune': { code: 200, body: { VolumesDeleted: ['a', 'b'], SpaceReclaimed: 10 } },
+	};
+	const svc = createDocker({ call: async (o, m, p) => { calls.push([o, m, p]); return replies[`${o}.${m}`] ?? { code: 204, body: '' }; } }, {});
+	assert.deepEqual(await svc.update(c.Id), { kind: 'recreate', state: 'running' });
+	const [, , upd] = calls.at(-1);
+	assert.equal(upd.mode, 'update');
+	assert.equal(upd.body.Image, 'busybox:stable');
+	assert.deepEqual(calls.find(x => x[1] === 'inspect' && x[0] === 'docker.image')[2], { id: 'sha256:old' });
+	const { base, form } = await svc.editForm(c.Id);
+	form.env = ['A=2'];
+	form.name = 'web2';
+	await svc.edit(c.Id, base, form);
+	assert.deepEqual([calls.at(-1)[2].mode, calls.at(-1)[2].name, calls.at(-1)[2].body.Env], ['edit', 'web2', ['A=2']]);
+	replies['docker.container.inspect'] = { code: 200, body: { ...c, Config: { ...c.Config, Image: 'sha256:' + 'b'.repeat(64) } } };
+	await assert.rejects(svc.update(c.Id), /image ID/);
+
+	await svc.composeStart('app', 'remove', true);
+	assert.deepEqual(calls.at(-1), ['sight.docker', 'compose_start', { name: 'app', action: 'remove', volumes: true }]);
+	await assert.rejects(svc.composeWrite('app', 'x', true), e => e.reason === 'invalid_compose');
+	assert.deepEqual(calls.at(-1), ['sight.docker', 'compose_write', { name: 'app', content: 'x', create: true }]);
+	assert.deepEqual(await svc.pruneVolumes(), { count: 2, reclaimed: 10 });
+	assert.deepEqual(calls.at(-1), ['docker.volume', 'prune', { query: { filters: '{"all":["true"]}' } }]);
+	await svc.createVolume('');
+	assert.deepEqual(calls.at(-1), ['docker.volume', 'create', { opts: {} }]);
+
+	const r = await svc.terminalStart(c.Id, { protocol: 'http:', hostname: '192.168.1.1' });
+	assert.deepEqual(calls.at(-1), ['sight.docker', 'terminal_start', { id: c.Id, host: '192.168.1.1', tls: false }]);
+	assert.equal(r.url, 'http://192.168.1.1:7700/0123456789abcdef0123456789abcdef/');
+	replies['sight.docker.terminal_start'].session.tls = true;
+	assert.equal((await svc.terminalStart(c.Id, { protocol: 'https:', hostname: 'fd00::1' })).url, 'https://[fd00::1]:7700/0123456789abcdef0123456789abcdef/');
+	assert.equal(calls.at(-1)[2].tls, true);
 });
