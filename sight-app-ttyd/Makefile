@@ -21,7 +21,7 @@ define Package/sight-app-ttyd
   PKGARCH:=all
   # sight.rpc 由 sight-ui 0.5.0 起提供，terminal 图标自 0.9.0 起
   EXTRA_DEPENDS:=sight-ui (>=0.9.0)
-  DEPENDS:=+ttyd +rpcd-mod-ucode +ucode-mod-fs +ucode-mod-uci +ucode-mod-ubus +ucode-mod-uloop +sight-ui
+  DEPENDS:=+ttyd +rpcd +rpcd-mod-ucode +ucode-mod-fs +ucode-mod-uci +ucode-mod-ubus +ucode-mod-uloop +sight-ui
 endef
 
 define Package/sight-app-ttyd/description
