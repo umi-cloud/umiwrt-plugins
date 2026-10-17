@@ -1,0 +1,23 @@
+{
+	"Terminal": "终端",
+	"Open a command line on the router in a browser tab.": "在浏览器标签页中打开路由器的命令行。",
+	"Opens a command line on the router as root in a new browser tab. Each session accepts one connection from this network and ends when you close its tab.": "在新的浏览器标签页中以 root 身份打开路由器命令行。每个会话只接受一次来自局域网的连接，关闭标签页即结束。",
+	"Open terminal": "打开终端",
+	"Starting…": "正在启动…",
+	"Sessions": "会话",
+	"Started at %s": "%s 启动",
+	"Checking…": "正在查询…",
+	"Ended because nobody connected within %d seconds.": "%d 秒内没有连接，已结束。",
+	"Ended.": "已结束。",
+	"Connected. Closing the terminal tab ends the session.": "已连接。关闭终端标签页即结束会话。",
+	"Waiting for the terminal tab to connect.": "等待终端标签页连接。",
+	"Connected": "已连接",
+	"Waiting": "等待中",
+	"Ended": "已结束",
+	"Open the tab again": "重新打开标签页",
+	"End session": "结束会话",
+	"The terminal is only available when Sight is opened through a LAN address of the router": "只有通过路由器的局域网地址打开 Sight 时才能使用终端",
+	"Sight is opened over HTTPS, but the router’s certificate was not found, so the terminal cannot use HTTPS": "Sight 通过 HTTPS 打开，但找不到路由器的证书，终端无法使用 HTTPS",
+	"ttyd is not installed. Reinstall sight-app-ttyd.": "未安装 ttyd，请重新安装 sight-app-ttyd。",
+	"This terminal session no longer exists.": "该终端会话已不存在。"
+}

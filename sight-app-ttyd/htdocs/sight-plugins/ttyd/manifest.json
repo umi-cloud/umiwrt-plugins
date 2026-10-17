@@ -1,0 +1,16 @@
+{
+	"id": "ttyd",
+	"sdk": 1,
+	"version": "1.0.0+e9f431b0",
+	"path": "/ttyd",
+	"title": "Terminal",
+	"description": "Open a command line on the router in a browser tab.",
+	"icon": "terminal",
+	"group": "tools",
+	"package": "sight-app-ttyd",
+	"entry": "page.js",
+	"css": "page.css",
+	"locales": {
+		"zh": "zh.json"
+	}
+}

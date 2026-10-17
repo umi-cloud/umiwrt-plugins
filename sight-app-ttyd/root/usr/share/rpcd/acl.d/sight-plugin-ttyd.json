@@ -1,0 +1,20 @@
+{
+	"sight-plugin-ttyd": {
+		"description": "Sight Terminal page: start, check and end one-time terminal sessions on the router",
+		"read": {
+			"ubus": {
+				"sight.ttyd": [
+					"status"
+				]
+			}
+		},
+		"write": {
+			"ubus": {
+				"sight.ttyd": [
+					"start",
+					"stop"
+				]
+			}
+		}
+	}
+}

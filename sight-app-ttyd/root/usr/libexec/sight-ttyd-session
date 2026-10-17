@@ -1,0 +1,86 @@
+#!/usr/bin/ucode
+'use strict';
+/*
+ * 由 sight.ttyd start 在后台启动：从 /tmp/sight-ttyd/queue/ 认领一个会话（原子改名），以参数数组启动一次性的
+ * ttyd（--once，只认一个客户端，断开即退出），命令为 login -f root 进入 root 的登录环境；
+ * 客户端在 CONNECT_TIMEOUT 内没有连上则结束 ttyd。会话状态写回 /tmp/sight-ttyd/<id>.json。
+ * ttyd 只记错误（-d 1），避免把一次性路径写进系统日志。做法与 sight-app-docker 的 sight-docker-terminal 一致。
+ */
+import { readfile, writefile, rename, glob, access, unlink } from 'fs';
+import * as uloop from 'uloop';
+
+const DIR = '/tmp/sight-ttyd';
+const TTYD = '/usr/bin/ttyd';
+const CONNECT_TIMEOUT = 60, LISTEN_TIMEOUT = 10;
+const ID_RE = /^[a-f0-9]{16}$/;
+
+let session = null, file = null;
+for (let q in glob(DIR + '/queue/*.json')) {
+	const id = replace(substr(q, rindex(q, '/') + 1), /\.json$/, '');
+	if (!match(id, ID_RE)) continue;
+	const claimed = `${DIR}/${id}.json`;
+	if (!rename(q, claimed)) continue;
+	try { session = json(readfile(claimed)); } catch { session = null; }
+	file = claimed;
+	break;
+}
+if (!session || !match(session.id, ID_RE) || !match(session.base, /^\/[a-f0-9]{32}$/)) exit(1);
+
+function save() {
+	writefile(file + '.tmp', sprintf('%J', session));
+	rename(file + '.tmp', file);
+}
+function listening(port) {
+	for (let f in ['/proc/net/tcp', '/proc/net/tcp6'])
+		for (let line in split(readfile(f) || '', '\n')) {
+			const m = match(line, /^\s*\d+:\s+[0-9A-F]+:([0-9A-F]{4})\s+[0-9A-F]+:[0-9A-F]{4}\s+0A/);
+			if (m && int(m[1], 16) == port) return true;
+		}
+	return false;
+}
+/* ttyd 只在客户端连上时才派生 login：有子进程即视为已连接 */
+function has_child(pid) {
+	for (let f in glob('/proc/[0-9]*/stat')) {
+		const s = readfile(f);
+		if (!s) continue;
+		const rest = split(trim(substr(s, rindex(s, ')') + 1)), ' ');
+		if (int(rest[1]) == pid) return true;
+	}
+	return false;
+}
+
+const args = ['-d', '1', '-p', '' + session.port, '-i', session.bind, '-b', session.base, '--once', '--check-origin', '--writable',
+	'-t', 'titleFixed=' + session.name, '-t', 'disableLeaveAlert=true'];
+if (index(session.bind, ':') >= 0) push(args, '-6');
+if (session.tls) push(args, '-S', '-C', session.cert, '-K', session.key);
+push(args, '/bin/login', '-f', 'root');
+
+uloop.init();
+const started = time();
+session.state = 'starting';
+session.started = started;
+const proc = uloop.process(TTYD, args, {}, (code) => {
+	session.state = 'ended';
+	session.ended = time();
+	session.exit = code;
+	if (access(`${DIR}/${session.id}.stop`)) { session.reason = 'stopped'; unlink(`${DIR}/${session.id}.stop`); }
+	session.reason ??= session.connected ? 'closed' : 'failed';
+	save();
+	uloop.end();
+});
+session.pid = proc.pid();
+save();
+
+uloop.interval(1000, () => {
+	if (session.state == 'ended') return;
+	if (session.state == 'starting') {
+		if (listening(session.port)) { session.state = 'ready'; save(); }
+		else if (time() - started >= LISTEN_TIMEOUT) { session.reason = 'failed'; system(['kill', '' + session.pid]); return; }
+	}
+	if (!session.connected && has_child(session.pid)) { session.connected = time(); save(); }
+	if (!session.connected && time() - started >= CONNECT_TIMEOUT) {
+		session.reason = 'timeout';
+		system(['kill', '' + session.pid]);
+	}
+});
+uloop.run();

@@ -1,0 +1,182 @@
+// 路由器终端（对象 sight.ttyd）：按需启动一次性的 ttyd 会话，进入 root 的登录环境。
+// 会话只监听 LAN 侧地址、路径是一次性的随机串、只接受一个连接（--once），60 秒内没人连上即结束；
+// 启动与监控由 sight-ttyd-session 在后台完成。做法与 sight-app-docker 的容器终端一致，失败按 docs/rpc.md 用状态码。
+
+'use strict';
+
+import * as fs from 'fs';
+import { cursor } from 'uci';
+import { connect } from 'ubus';
+import { STATUS, fail } from 'sight.rpc';
+
+const DIR = '/tmp/sight-ttyd';
+const RUNNER = '/usr/libexec/sight-ttyd-session';
+const TTYD = '/usr/bin/ttyd';
+/* 端口段与容器终端（7682 起）错开 */
+const PORT_FIRST = 7782, PORT_COUNT = 100;
+const SPAWN_GRACE = 30, CONNECT_TIMEOUT = 60;
+const ID = /^[a-f0-9]{16}$/;
+
+let bus = null;
+
+function read_json(path) {
+	const s = fs.readfile(path);
+	if (!s) return null;
+	try { return json(s); } catch { return null; }
+}
+function write_json(path, value) {
+	fs.writefile(path + '.tmp', sprintf('%J', value));
+	return fs.rename(path + '.tmp', path);
+}
+/* 会话文件含一次性路径，目录只给 root */
+function private_dir(path) {
+	fs.mkdir(path, 0700);
+	fs.chmod(path, 0700);
+}
+function random_hex(bytes) {
+	const raw = fs.readfile('/dev/urandom', bytes);
+	return length(raw) == bytes ? hexenc(raw) : null;
+}
+
+/* 可绑定的本机地址：所属防火墙区域放行入站且不做地址伪装的接口地址，另加回环 */
+function lan_addresses() {
+	const ctx = cursor();
+	const nets = {};
+	ctx.foreach('firewall', 'zone', (z) => {
+		if (z.input != 'ACCEPT' || z.masq == '1') return;
+		for (let n in (type(z.network) == 'array' ? z.network : split(z.network || '', /\s+/)))
+			if (n) nets[n] = true;
+	});
+	ctx.unload();
+	bus ??= connect();
+	const dump = bus?.call('network.interface', 'dump')?.interface || [];
+	const out = { v4: [], all: { '127.0.0.1': true, '::1': true }, lan: null };
+	for (let i in dump) {
+		if (!nets[i.interface] || !i.up) continue;
+		for (let a in i['ipv4-address'] || []) {
+			push(out.v4, a.address);
+			out.all[a.address] = true;
+			if (i.interface == 'lan') out.lan ??= a.address;
+		}
+		for (let a in i['ipv6-address'] || []) out.all[a.address] = true;
+		for (let p in i['ipv6-prefix-assignment'] || []) if (p['local-address']?.address) out.all[p['local-address'].address] = true;
+	}
+	return out;
+}
+
+/* 浏览器访问 Sight 用的地址：是 LAN 侧地址就绑定它；是主机名则绑定 lan 的 IPv4；其它（如 WAN 地址）拒绝 */
+function bind_address(host) {
+	if (type(host) != 'string' || length(host) > 255) return null;
+	host = trim(host, '[]');
+	const lan = lan_addresses();
+	if (lan.all[host]) return host;
+	if (match(host, /^[0-9.]+$/) || index(host, ':') >= 0) return null;
+	if (!match(host, /^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$/)) return null;
+	return lan.lan ?? lan.v4[0];
+}
+
+function used_ports() {
+	const used = {};
+	for (let f in ['/proc/net/tcp', '/proc/net/tcp6'])
+		for (let line in split(fs.readfile(f) || '', '\n')) {
+			const m = match(line, /^\s*\d+:\s+[0-9A-F]+:([0-9A-F]{4})\s/);
+			if (m) used[int(m[1], 16)] = true;
+		}
+	return used;
+}
+
+/* 会话文件；runner 已退出（或启动失败）的会话视为结束 */
+function session(id) {
+	const s = read_json(`${DIR}/${id}.json`) || read_json(`${DIR}/queue/${id}.json`);
+	if (!s) return null;
+	if (s.state != 'ended') {
+		const alive = s.pid ? fs.access(`/proc/${s.pid}`) : time() - s.created < SPAWN_GRACE;
+		if (!alive) { s.state = 'ended'; s.reason ??= 'failed'; }
+	}
+	return s;
+}
+/* 给页面的会话：一次性路径只在启动时返回 */
+function public_session(s, secret) {
+	const out = { id: s.id, port: s.port, tls: s.tls, state: s.state ?? 'starting', connected: s.connected || null, created: s.created, reason: s.reason || null, timeout: CONNECT_TIMEOUT };
+	if (secret) out.path = s.base + '/';
+	return out;
+}
+/* 只结束自己启动的 ttyd：核对进程命令行里的一次性路径 */
+function kill_session(s) {
+	if (!s?.pid) return false;
+	const cmdline = fs.readfile(`/proc/${s.pid}/cmdline`) || '';
+	if (index(cmdline, TTYD + '\0') != 0 || index(cmdline, '\0' + s.base + '\0') < 0) return false;
+	return system(['kill', '' + s.pid]) == 0;
+}
+/* 清理一小时前结束的会话文件 */
+function prune() {
+	for (let f in fs.glob(DIR + '/*.json')) {
+		const s = read_json(f);
+		if (s?.state == 'ended' && time() - (s.ended ?? s.created) > 3600) fs.unlink(f);
+	}
+}
+
+const methods = {
+	start: {
+		args: { host: '192.168.1.1', tls: false },
+		call: function(req) {
+			const tls = !!req.args?.tls;
+			if (!fs.access(TTYD, 'x')) return fail(req, STATUS.NOT_SUPPORTED);
+			const bind = bind_address(req.args?.host);
+			if (!bind) return fail(req, STATUS.PERMISSION_DENIED);
+			let cert = null, key = null;
+			if (tls) {
+				const ctx = cursor();
+				cert = ctx.get('uhttpd', 'main', 'cert') || '/etc/uhttpd.crt';
+				key = ctx.get('uhttpd', 'main', 'key') || '/etc/uhttpd.key';
+				ctx.unload();
+				if (!fs.access(cert) || !fs.access(key)) return fail(req, STATUS.NOT_SUPPORTED);
+			}
+			private_dir(DIR);
+			private_dir(DIR + '/queue');
+			prune();
+
+			const used = used_ports();
+			for (let f in fs.glob(DIR + '/*.json')) { const s = read_json(f); if (s?.port && s.state != 'ended') used[s.port] = true; }
+			const free = [];
+			for (let p = PORT_FIRST; p < PORT_FIRST + PORT_COUNT; p++) if (!used[p]) push(free, p);
+			const id = random_hex(8), secret = random_hex(16), pick = random_hex(2);
+			if (!length(free) || !id || !secret || !pick) return fail(req, STATUS.UNKNOWN_ERROR);
+
+			const hostname = trim(fs.readfile('/proc/sys/kernel/hostname') || '') || 'router';
+			const s = { id, name: hostname, port: free[int(pick, 16) % length(free)], bind, base: '/' + secret, tls, cert, key, created: time() };
+			write_json(`${DIR}/queue/${id}.json`, s);
+			system(`${RUNNER} </dev/null >/dev/null 2>&1 &`);
+			return { session: public_session(s, true) };
+		}
+	},
+
+	status: {
+		args: { id: '0123456789abcdef' },
+		call: function(req) {
+			const id = req.args?.id;
+			if (type(id) != 'string' || !match(id, ID)) return fail(req, STATUS.INVALID_ARGUMENT);
+			const s = session(id);
+			if (!s) return fail(req, STATUS.NOT_FOUND);
+			return { session: public_session(s) };
+		}
+	},
+
+	stop: {
+		args: { id: '0123456789abcdef' },
+		call: function(req) {
+			const id = req.args?.id;
+			if (type(id) != 'string' || !match(id, ID)) return fail(req, STATUS.INVALID_ARGUMENT);
+			const s = session(id);
+			if (!s) return fail(req, STATUS.NOT_FOUND);
+			/* 留下标记，后台进程退出时据此记为手动结束 */
+			if (s.state != 'ended') {
+				fs.writefile(`${DIR}/${id}.stop`, '');
+				if (!kill_session(s)) return fail(req, STATUS.UNKNOWN_ERROR);
+			}
+			return {};
+		}
+	},
+};
+
+return { 'sight.ttyd': methods };

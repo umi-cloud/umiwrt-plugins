@@ -1,0 +1,9 @@
+{
+	"id": "ttyd",
+	"title": "Terminal",
+	"description": "Open a command line on the router in a browser tab.",
+	"icon": "terminal",
+	"group": "tools",
+	"version": "1.0.0",
+	"package": "sight-app-ttyd"
+}

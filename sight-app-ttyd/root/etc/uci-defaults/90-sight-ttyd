@@ -1,0 +1,15 @@
+#!/bin/sh
+# ttyd 包默认在 LAN 上常开一个 /bin/login 登录终端（7681）；本插件按需开一次性会话，用不到它，首次安装时关掉。
+# 只关没有显式设置 enable 的 /bin/login 实例，并在该段记下 sight_login_disabled，之后用户自己打开的不会再被关掉。
+
+changed=0
+for s in $(uci -q show ttyd | sed -n 's/^ttyd\.\([^.=]*\)=ttyd$/\1/p'); do
+	[ "$(uci -q get ttyd.$s.command)" = /bin/login ] || continue
+	[ -z "$(uci -q get ttyd.$s.enable)" ] || continue
+	[ "$(uci -q get ttyd.$s.sight_login_disabled)" = 1 ] && continue
+	uci set ttyd.$s.enable=0
+	uci set ttyd.$s.sight_login_disabled=1
+	changed=1
+done
+[ "$changed" = 1 ] && uci commit ttyd && [ -x /etc/init.d/ttyd ] && /etc/init.d/ttyd restart >/dev/null 2>&1
+exit 0
