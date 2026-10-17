@@ -3,32 +3,30 @@
 		"description": "Sight Docker page: containers (create, edit and update by recreating, start/stop/restart, delete, restart policy, usage, logs, terminal), images, networks, volumes, Compose projects, dockerd settings",
 		"read": {
 			"ubus": {
-				"docker": [
+				"sight.docker": [
+					"compose_list",
+					"compose_read",
 					"df",
 					"info",
+					"logs",
+					"task_status",
+					"terminal_status",
 					"version"
 				],
-				"docker.container": [
+				"sight.docker.container": [
 					"inspect",
 					"list",
 					"stats"
 				],
-				"docker.image": [
+				"sight.docker.image": [
 					"inspect",
 					"list"
 				],
-				"docker.network": [
+				"sight.docker.network": [
 					"list"
 				],
-				"docker.volume": [
+				"sight.docker.volume": [
 					"list"
-				],
-				"sight.docker": [
-					"compose_list",
-					"compose_read",
-					"logs",
-					"task_status",
-					"terminal_status"
 				]
 			},
 			"uci": [
@@ -37,27 +35,6 @@
 		},
 		"write": {
 			"ubus": {
-				"docker.container": [
-					"create",
-					"remove",
-					"restart",
-					"start",
-					"stop",
-					"update"
-				],
-				"docker.image": [
-					"prune",
-					"remove"
-				],
-				"docker.network": [
-					"create",
-					"remove"
-				],
-				"docker.volume": [
-					"create",
-					"prune",
-					"remove"
-				],
 				"sight.docker": [
 					"compose_start",
 					"compose_write",
@@ -65,6 +42,27 @@
 					"recreate_start",
 					"terminal_start",
 					"terminal_stop"
+				],
+				"sight.docker.container": [
+					"create",
+					"remove",
+					"restart",
+					"start",
+					"stop",
+					"update"
+				],
+				"sight.docker.image": [
+					"prune",
+					"remove"
+				],
+				"sight.docker.network": [
+					"create",
+					"remove"
+				],
+				"sight.docker.volume": [
+					"create",
+					"prune",
+					"remove"
 				]
 			},
 			"uci": [

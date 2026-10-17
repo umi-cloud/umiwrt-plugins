@@ -3,7 +3,7 @@
 		"description": "Sight HomeProxy page: status, nodes, routing, domain lists, subscriptions, resources and logs",
 		"read": {
 			"ubus": {
-				"luci.homeproxy": [
+				"sight.homeproxy": [
 					"acllist_read",
 					"connection_check",
 					"resources_get_version",
@@ -27,7 +27,7 @@
 		},
 		"write": {
 			"ubus": {
-				"luci.homeproxy": [
+				"sight.homeproxy": [
 					"acllist_write",
 					"log_clean",
 					"resources_update"

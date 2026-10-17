@@ -48,7 +48,7 @@ sight-app-<id>/
 打包约定：
 
 - 不依赖 LuCI（`luci-base`、`luci-app-*`）。需要的 LuCI 后端移植进本包，保留原版权与许可声明，`PKG_LICENSE` 列出全部许可证；`LICENSE` 放在包目录。
-- 启动项操作调宿主的 `sight.setInitAction`，包里用 `EXTRA_DEPENDS:=sight-ui (>=0.4.0)` 约束宿主版本；rpcd 对象不要用 `luci.` 前缀（沿用上游名称的除外，如 `luci.homeproxy`）。
+- rpcd 对象一律叫 `sight.<id>`（子对象 `sight.<id>.<x>`），失败用 ubus 状态码，公共辅助从宿主的 `sight.rpc` 引用，约定见 sight-ui 的 `docs/rpc.md`；启动项操作调宿主的 `sight.setInitAction`，包里用 `EXTRA_DEPENDS:=sight-ui (>=0.5.0)` 约束宿主版本。
 - 与提供同名 rpcd 对象的 LuCI 包用 `CONFLICTS` 互斥，不写 `PROVIDES luci-app-*`（会连带选中 LuCI 翻译包）。
 - `postinst`、`postrm` 都重载 rpcd，装卸后接口与权限即时生效或撤下。
 - 不移植把参数直接拼进 shell 的方法；需要执行命令时用参数数组。

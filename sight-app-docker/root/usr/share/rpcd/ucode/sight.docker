@@ -1,6 +1,7 @@
 #!/usr/bin/env ucode
 
-// Docker 引擎接口（对象 docker、docker.container、docker.image 等），移植自 luci-app-dockerman 的
+// Docker 引擎接口（对象 sight.docker、sight.docker.container、sight.docker.image 等；按 Sight 约定置于 sight.* 命名空间，
+// 与 luci-app-dockerman 的 docker.* 对象互不冲突），移植自 luci-app-dockerman 的
 // rpcd/ucode/docker_rpc.uc，使插件不依赖 luci-app-dockerman / luci-base：
 // luci.http 的 build_querystring 改为本文件内实现，luci.docker_socket 改为同样移植过来的 sight.docker_socket；
 // 去掉 ttyd_start（把参数直接拼进 shell 命令）；文末另加 Sight 用的 sight.docker 对象（日志、后台任务、Compose 项目、
@@ -761,21 +762,25 @@ const sight_methods = {
 	terminal_stop:   { args: { id: '' }, call: terminal_stop },
 };
 
+// 引擎的通用方法（version/info/df…）与本插件的任务、Compose、终端方法合为一个对象
+const docker_methods = {};
+for (let name, m in core_methods) docker_methods[name] = m;
+for (let name, m in sight_methods) docker_methods[name] = m;
+
 const methods = {
-	'sight.docker': sight_methods,
-	'docker': core_methods, 
-	'docker.container': container_methods,
-	'docker.exec': exec_methods,
-	'docker.image': image_methods,
-	'docker.network': network_methods,
-	'docker.volume': volume_methods,
+	'sight.docker': docker_methods,
+	'sight.docker.container': container_methods,
+	'sight.docker.exec': exec_methods,
+	'sight.docker.image': image_methods,
+	'sight.docker.network': network_methods,
+	'sight.docker.volume': volume_methods,
 };
 
 // CLI test mode - check if script is run directly (not loaded by rpcd)
 if (caller != 'rpcd') {
 	// Usage: ./docker_rpc.uc <object.method> <json-args>
-	// Example: ./docker_rpc.uc docker.network.list '{"query":{"filters":""}}'
-	// Example: ./docker_rpc.uc docker.image.create '{"query":{"fromImage":"alpine","tag":"latest"}}'
+	// Example: ./docker_rpc.uc sight.docker.network.list '{"query":{"filters":""}}'
+	// Example: ./docker_rpc.uc sight.docker.image.create '{"query":{"fromImage":"alpine","tag":"latest"}}'
 	const scr_name = split(SCRIPT_NAME, '/')[-1] || 'docker_rpc.uc';
 
 	if (length(ARGV) < 1) {
@@ -797,10 +802,10 @@ if (caller != 'rpcd') {
 		}
 
 		print("\nExamples:\n");
-		print(`  ${scr_name} docker.version\n`);
-		print(`  ${scr_name} docker.network.list '{"query":{}}'\n`);
-		print(`  ${scr_name} docker.image.create '{"query":{"fromImage":"alpine","tag":"latest"}}'\n`);
-		print(`  ${scr_name} docker.container.list '{"query":{"all":true}}'\n`);
+		print(`  ${scr_name} sight.docker.version\n`);
+		print(`  ${scr_name} sight.docker.network.list '{"query":{}}'\n`);
+		print(`  ${scr_name} sight.docker.image.create '{"query":{"fromImage":"alpine","tag":"latest"}}'\n`);
+		print(`  ${scr_name} sight.docker.container.list '{"query":{"all":true}}'\n`);
 		exit(1);
 	}
 
@@ -809,7 +814,7 @@ if (caller != 'rpcd') {
 		die(`Invalid method path: ${ARGV[0]}\n`);
 	}
 
-	// Build object path (e.g., "docker.network")
+	// Build object path (e.g., "sight.docker.network")
 	const obj_parts = slice(method_path, 0, -1);
 	const obj_name = join('.', obj_parts);
 	const method_name = method_path[length(method_path) - 1];

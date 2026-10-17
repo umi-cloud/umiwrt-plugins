@@ -8,7 +8,7 @@
  */
 import { probe, readFile, isIPv4, isIPv6, isHostname, isMac, toList as list, ignoreNotFound } from '@sight/sdk/lib';
 
-/* 启动项操作走宿主自带的 sight 对象（sight-ui ≥ 0.4.0，包依赖已约束） */
+/* 启动项操作走宿主自带的 sight 对象（sight-ui ≥ 0.5.0，包依赖已约束） */
 const initAction = (client, name, action) => client.call('sight', 'setInitAction', { name, action });
 import { parseShareLink } from './sharelink.js';
 import { FILTER_MODES, nodesInUse, planFilter, validateFilter } from './subscription.js';
@@ -165,7 +165,7 @@ export function createHomeProxy(client, uci) {
 	return {
 		/** @returns {Promise<null | ReturnType<typeof shape> & { version: string, features: object }>} null = 未安装 */
 		async load() {
-			const features = await probe(client, 'luci.homeproxy', 'singbox_get_features');
+			const features = await probe(client, 'sight.homeproxy', 'singbox_get_features');
 			if (!features) return null;
 			const [cfg, services] = await Promise.all([uci.load('homeproxy'), client.call('service', 'list', { name: 'homeproxy' }).catch(() => null)]);
 			return { ...shape(cfg, services), version: features.version || '', features };
@@ -290,19 +290,19 @@ export function createHomeProxy(client, uci) {
 		async resourceVersions() {
 			/* 插件在返回版本号的同时可能带着残留的 error 字段（上一次系统调用的 errno）：有版本号即以版本号为准。
 			   读取失败向上抛，不当作未下载 */
-			const r = await Promise.all(RESOURCES.map(type => client.call('luci.homeproxy', 'resources_get_version', { type })));
+			const r = await Promise.all(RESOURCES.map(type => client.call('sight.homeproxy', 'resources_get_version', { type })));
 			return Object.fromEntries(RESOURCES.map((type, i) => [type, r[i]?.version || null]));
 		},
 		/** @returns {Promise<'updated' | 'failed' | 'busy' | 'latest'>} */
 		async updateResource(type) {
 			if (!RESOURCES.includes(type)) throw new Error('Unknown resource');
-			const r = await client.call('luci.homeproxy', 'resources_update', { type });
+			const r = await client.call('sight.homeproxy', 'resources_update', { type });
 			return UPDATE_RESULT[r?.status] || 'failed';
 		},
 		/** @returns {Promise<boolean>} 经代理访问该站点是否成功 */
 		async check(site) {
 			if (!SITES.includes(site)) throw new Error('Unknown site');
-			const r = await client.call('luci.homeproxy', 'connection_check', { site });
+			const r = await client.call('sight.homeproxy', 'connection_check', { site });
 			return !!r?.result;
 		},
 		/** @returns {Promise<string | null>} null = 日志文件不存在（服务未运行过） */
@@ -313,7 +313,7 @@ export function createHomeProxy(client, uci) {
 		},
 		/** @returns {Promise<{ proxy_list: string[], direct_list: string[] }>} */
 		async domainLists() {
-			const r = await Promise.all(DOMAIN_LISTS.map(type => client.call('luci.homeproxy', 'acllist_read', { type })));
+			const r = await Promise.all(DOMAIN_LISTS.map(type => client.call('sight.homeproxy', 'acllist_read', { type })));
 			return Object.fromEntries(DOMAIN_LISTS.map((type, i) => [type, parseDomains(r[i]?.content)]));
 		},
 		/** 写入有变化的列表（文件，不走暂存）；代理开着时重载服务让新列表生效，会短暂中断代理 */
@@ -322,7 +322,7 @@ export function createHomeProxy(client, uci) {
 				const next = parseDomains(lists[type].join('\n'));
 				if (validateDomains(next).length) throw new Error('Invalid domain');
 				if (next.join('\n') === current[type].join('\n')) continue;
-				const r = await client.call('luci.homeproxy', 'acllist_write', { type, content: next.join('\n') });
+				const r = await client.call('sight.homeproxy', 'acllist_write', { type, content: next.join('\n') });
 				if (r?.result === false) throw new Error(r.error || 'Request failed');
 			}
 			if (enabled) await initAction(client, 'homeproxy', 'reload');
@@ -338,7 +338,7 @@ export function createHomeProxy(client, uci) {
 		},
 		async cleanLog(name) {
 			if (!LOGS.includes(name)) throw new Error('Unknown log');
-			await client.call('luci.homeproxy', 'log_clean', { type: name });
+			await client.call('sight.homeproxy', 'log_clean', { type: name });
 		},
 	};
 }

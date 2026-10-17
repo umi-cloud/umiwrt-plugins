@@ -19,7 +19,7 @@ import {
 
 const ubus = connect();
 
-/* const features = ubus.call('luci.homeproxy', 'singbox_get_features') || {}; */
+/* const features = ubus.call('sight.homeproxy', 'singbox_get_features') || {}; */
 
 /* UCI config start */
 const uci = cursor();

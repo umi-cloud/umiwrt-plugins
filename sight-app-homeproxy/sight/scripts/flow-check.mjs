@@ -19,14 +19,14 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const { check, section, sh, ubus, denied, contract, withAclUser, browser, finish } = await createFlow({ id: 'homeproxy', outDir: join(ROOT, '.visual-out/flow') });
 
 section('接口签名');
-contract('luci.homeproxy', { singbox_get_features: {}, connection_check: { site: 'String' }, resources_get_version: { type: 'String' }, resources_update: { type: 'String' }, log_clean: { type: 'String' }, acllist_read: { type: 'String' }, acllist_write: { type: 'String', content: 'String' } });
+contract('sight.homeproxy', { singbox_get_features: {}, connection_check: { site: 'String' }, resources_get_version: { type: 'String' }, resources_update: { type: 'String' }, log_clean: { type: 'String' }, acllist_read: { type: 'String' }, acllist_write: { type: 'String', content: 'String' } });
 
 section('ACL：权限来自本包');
 await withAclUser(['sight-ui'], async sid => {
-	check(denied(await ubus(sid, 'luci.homeproxy', 'singbox_get_features')) && denied(await ubus(sid, 'uci', 'get', { config: 'homeproxy' })), '只有 sight-ui 组的账号不能访问 HomeProxy');
+	check(denied(await ubus(sid, 'sight.homeproxy', 'singbox_get_features')) && denied(await ubus(sid, 'uci', 'get', { config: 'homeproxy' })), '只有 sight-ui 组的账号不能访问 HomeProxy');
 });
 await withAclUser(['sight-ui', 'sight-plugin-homeproxy'], async sid => {
-	for (const [o, m, p] of [['luci.homeproxy', 'singbox_get_features', {}], ['luci.homeproxy', 'acllist_read', { type: 'proxy_list' }], ['uci', 'get', { config: 'homeproxy' }]])
+	for (const [o, m, p] of [['sight.homeproxy', 'singbox_get_features', {}], ['sight.homeproxy', 'acllist_read', { type: 'proxy_list' }], ['uci', 'get', { config: 'homeproxy' }]])
 		check((await ubus(sid, o, m, p))?.[0] === 0, `加上本包权限组后可调用 ${o}.${m}`);
 	const ping = params => ubus(sid, 'file', 'exec', { command: '/bin/ping', params });
 	check((await ping(['-4', '-c', '3', '-W', '1', '127.0.0.1']))?.[0] === 0 && denied(await ping(['-4', '-c', '300', '-W', '1', '127.0.0.1'])), '延迟测试只放行固定参数的 ping');

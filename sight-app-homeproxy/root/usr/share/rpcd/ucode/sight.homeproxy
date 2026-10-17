@@ -8,11 +8,7 @@
 'use strict';
 
 import { access, error, lstat, popen, readfile, writefile } from 'fs';
-
-/* Kanged from ucode/luci */
-function shellquote(s) {
-	return `'${replace(s, "'", "'\\''")}'`;
-}
+import { shellquote } from 'sight.rpc';
 
 function hasKernelModule(kmod) {
 	return (system(sprintf('[ -e "/lib/modules/$(uname -r)"/%s ]', shellquote(kmod))) === 0);
@@ -251,4 +247,4 @@ const methods = {
 	}
 };
 
-return { 'luci.homeproxy': methods };
+return { 'sight.homeproxy': methods };

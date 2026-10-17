@@ -8,7 +8,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=sight-app-homeproxy
 PKG_VERSION:=1.2.0
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 
 PKG_LICENSE:=GPL-2.0-only
 PKG_LICENSE_FILES:=LICENSE
@@ -22,7 +22,7 @@ define Package/sight-app-homeproxy
   TITLE:=HomeProxy (sing-box) for Sight
   PKGARCH:=all
   # 启动项等系统接口由 sight-ui 0.4.0 起自带的 sight 对象提供
-  EXTRA_DEPENDS:=sight-ui (>=0.4.0)
+  EXTRA_DEPENDS:=sight-ui (>=0.5.0)
   DEPENDS:= \
 	+sing-box \
 	+firewall4 \

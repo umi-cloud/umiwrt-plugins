@@ -65,15 +65,15 @@ const listening = port => sh(`netstat -ltn 2>/dev/null | awk '{print $4}' | grep
 const waitListen = async port => { for (let i = 0; i < 20 && !listening(port); i++) await sleep(300); return listening(port); };
 
 section('接口签名');
-contract('docker', { version: {}, info: {}, df: {} });
-contract('docker.container', {
+contract('sight.docker', { version: {}, info: {}, df: {} });
+contract('sight.docker.container', {
 	list: { query: 'Table' }, inspect: { id: 'String', query: 'Table' }, stats: { id: 'String', query: 'Table' },
 	start: { id: 'String', query: 'Table' }, stop: { id: 'String', query: 'Table' }, restart: { id: 'String', query: 'Table' },
 	create: { query: 'Table', body: 'Table' }, remove: { id: 'String', query: 'Table' }, update: { id: 'String', body: 'Table' },
 });
-contract('docker.image', { list: { query: 'Table' }, inspect: { id: 'String' }, remove: { id: 'String', query: 'Table' }, prune: { query: 'Table' } });
-contract('docker.network', { list: { query: 'Table' }, create: { body: 'Table' }, remove: { id: 'String' } });
-contract('docker.volume', { list: { query: 'Table' }, create: { opts: 'Table' }, remove: { id: 'String', query: 'Table' }, prune: { query: 'Table' } });
+contract('sight.docker.image', { list: { query: 'Table' }, inspect: { id: 'String' }, remove: { id: 'String', query: 'Table' }, prune: { query: 'Table' } });
+contract('sight.docker.network', { list: { query: 'Table' }, create: { body: 'Table' }, remove: { id: 'String' } });
+contract('sight.docker.volume', { list: { query: 'Table' }, create: { opts: 'Table' }, remove: { id: 'String', query: 'Table' }, prune: { query: 'Table' } });
 contract('sight.docker', {
 	logs: { id: 'String', tail: 'Integer' }, task_status: {}, pull_start: { image: 'String' },
 	recreate_start: { id: 'String', mode: 'String', name: 'String', body: 'Table' },
@@ -83,19 +83,19 @@ contract('sight.docker', {
 
 section('ACL：权限来自本包');
 await withAclUser(['sight-ui'], async sid => {
-	check(denied(await ubus(sid, 'docker', 'version')) && denied(await ubus(sid, 'sight.docker', 'task_status')) && denied(await ubus(sid, 'uci', 'get', { config: 'dockerd' })), '只有 sight-ui 组的账号不能访问 Docker');
+	check(denied(await ubus(sid, 'sight.docker', 'version')) && denied(await ubus(sid, 'sight.docker', 'task_status')) && denied(await ubus(sid, 'uci', 'get', { config: 'dockerd' })), '只有 sight-ui 组的账号不能访问 Docker');
 });
 await withAclUser(['sight-ui', 'sight-plugin-docker'], async sid => {
-	for (const [o, m, p] of [['docker', 'version', {}], ['docker.container', 'list', { query: { all: true } }], ['docker.image', 'list', {}], ['docker.network', 'list', { query: {} }],
-		['docker.volume', 'list', { query: {} }], ['sight.docker', 'task_status', {}], ['sight.docker', 'compose_list', {}], ['sight.docker', 'terminal_status', { id: 'sight-web' }],
+	for (const [o, m, p] of [['sight.docker', 'version', {}], ['sight.docker.container', 'list', { query: { all: true } }], ['sight.docker.image', 'list', {}], ['sight.docker.network', 'list', { query: {} }],
+		['sight.docker.volume', 'list', { query: {} }], ['sight.docker', 'task_status', {}], ['sight.docker', 'compose_list', {}], ['sight.docker', 'terminal_status', { id: 'sight-web' }],
 		['sight.docker', 'logs', { id: 'sight-job', tail: 5 }], ['uci', 'get', { config: 'dockerd' }]])
 		check((await ubus(sid, o, m, p))?.[0] === 0, `加上本包权限组后可调用 ${o}.${m}`);
 	/* 写操作用不存在的对象试探：放行时由 Docker 回 4xx，而不是被 ACL 拒绝 */
 	const missing = 'sight-flow-missing';
 	const allowed = [
-		await ubus(sid, 'docker.container', 'remove', { id: missing, query: {} }), await ubus(sid, 'docker.container', 'update', { id: missing, body: {} }),
-		await ubus(sid, 'docker.container', 'create', { query: { name: missing }, body: { Image: 'sight-flow-missing-image:none' } }),
-		await ubus(sid, 'docker.network', 'remove', { id: missing }), await ubus(sid, 'docker.volume', 'remove', { id: missing, query: {} }),
+		await ubus(sid, 'sight.docker.container', 'remove', { id: missing, query: {} }), await ubus(sid, 'sight.docker.container', 'update', { id: missing, body: {} }),
+		await ubus(sid, 'sight.docker.container', 'create', { query: { name: missing }, body: { Image: 'sight-flow-missing-image:none' } }),
+		await ubus(sid, 'sight.docker.network', 'remove', { id: missing }), await ubus(sid, 'sight.docker.volume', 'remove', { id: missing, query: {} }),
 	];
 	check(allowed.every(r => r?.[0] === 0 && r[1]?.code >= 400), '新建/删除容器、重启策略、网络与卷的删除已放行（不存在的对象由 Docker 报错）', allowed);
 	const injected = await ubus(sid, 'sight.docker', 'pull_start', { image: 'busybox; touch /tmp/sight-flow-pwned' });
@@ -112,10 +112,10 @@ await withAclUser(['sight-ui', 'sight-plugin-docker'], async sid => {
 	const cli = await ubus(sid, 'file', 'exec', { command: '/usr/bin/docker', params: ['logs', '--tail', '200', '--timestamps', 'f'.repeat(64)] });
 	check(cli?.[0] === 6, '不放行 docker CLI', cli);
 	const rejected = [
-		await ubus(sid, 'docker.container', 'exec', { id: missing, opts: {} }), await ubus(sid, 'docker.container', 'put_archive', { id: missing, query: {}, body: '' }),
-		await ubus(sid, 'docker.exec', 'start', { id: missing, body: '' }), await ubus(sid, 'docker.image', 'create', { query: {}, headers: {} }),
-		await ubus(sid, 'docker.image', 'load', { query: {} }), await ubus(sid, 'docker.container', 'prune', { query: {} }),
-		await ubus(sid, 'docker.network', 'connect', { id: missing, body: {} }), await ubus(sid, 'docker.container', 'rename', { id: missing, query: {} }),
+		await ubus(sid, 'sight.docker.container', 'exec', { id: missing, opts: {} }), await ubus(sid, 'sight.docker.container', 'put_archive', { id: missing, query: {}, body: '' }),
+		await ubus(sid, 'sight.docker.exec', 'start', { id: missing, body: '' }), await ubus(sid, 'sight.docker.image', 'create', { query: {}, headers: {} }),
+		await ubus(sid, 'sight.docker.image', 'load', { query: {} }), await ubus(sid, 'sight.docker.container', 'prune', { query: {} }),
+		await ubus(sid, 'sight.docker.network', 'connect', { id: missing, body: {} }), await ubus(sid, 'sight.docker.container', 'rename', { id: missing, query: {} }),
 		await ubus(sid, 'file', 'write', { path: '/etc/sight-docker/compose/x/compose.yaml', data: 'x' }),
 	];
 	check(rejected.every(denied), 'exec、写容器文件、原始拉取/导入镜像、批量清理容器、网络连接、改名与直接写文件仍未授权', rejected);

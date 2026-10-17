@@ -99,19 +99,19 @@ test('服务：删除容器、重启策略、清理镜像、日志与拉取的�
 	const replies = {
 		'sight.docker.logs': { code: 200, body: { text: 'a\nb\n' } },
 		'sight.docker.pull_start': { task: { image: 'busybox:latest', state: 'running' } },
-		'docker.image.prune': { code: 200, body: { ImagesDeleted: [{ Untagged: 'x' }], SpaceReclaimed: 1234 } },
-		'docker.container.create': { code: 201, body: { Id: 'c1' } },
-		'docker.container.start': { code: 500, body: { message: 'port is already allocated' } },
+		'sight.docker.image.prune': { code: 200, body: { ImagesDeleted: [{ Untagged: 'x' }], SpaceReclaimed: 1234 } },
+		'sight.docker.container.create': { code: 201, body: { Id: 'c1' } },
+		'sight.docker.container.start': { code: 500, body: { message: 'port is already allocated' } },
 	};
 	const svc = createDocker({ call: async (o, m, p) => { calls.push([o, m, p]); return replies[`${o}.${m}`] ?? { code: 204, body: '' }; } }, {});
 	const id = 'f'.repeat(64);
 	await svc.removeContainer(id, { force: true, volumes: false });
-	assert.deepEqual(calls.at(-1), ['docker.container', 'remove', { id, query: { force: true, v: false } }]);
+	assert.deepEqual(calls.at(-1), ['sight.docker.container', 'remove', { id, query: { force: true, v: false } }]);
 	await svc.setRestartPolicy(id, 'always');
-	assert.deepEqual(calls.at(-1), ['docker.container', 'update', { id, body: { RestartPolicy: { Name: 'always' } } }]);
+	assert.deepEqual(calls.at(-1), ['sight.docker.container', 'update', { id, body: { RestartPolicy: { Name: 'always' } } }]);
 	await assert.rejects(svc.setRestartPolicy(id, 'sometimes'), /Unknown restart policy/);
 	assert.deepEqual(await svc.pruneImages(), { reclaimed: 1234 });
-	assert.deepEqual(calls.at(-1), ['docker.image', 'prune', { query: { filters: '{"dangling":["false"]}' } }]);
+	assert.deepEqual(calls.at(-1), ['sight.docker.image', 'prune', { query: { filters: '{"dangling":["false"]}' } }]);
 	assert.deepEqual(await svc.logs(id), { ok: true, text: 'a\nb\n' });
 	assert.deepEqual(calls.at(-1), ['sight.docker', 'logs', { id, tail: 200 }]);
 	replies['sight.docker.logs'] = { code: 404, body: { message: 'No such container' } };
@@ -125,7 +125,7 @@ test('服务：删除容器、重启策略、清理镜像、日志与拉取的�
 	await assert.rejects(svc.create({ ...emptyCreate(), image: 'busybox:stable' }), e => e.created === 'c1' && /already allocated/.test(e.message));
 	await assert.rejects(svc.action(id, 'remove'), /Unknown action/);
 	await svc.action(id, 'stop');
-	assert.deepEqual(calls.at(-1), ['docker.container', 'stop', { id, query: { t: 10 } }]);
+	assert.deepEqual(calls.at(-1), ['sight.docker.container', 'stop', { id, query: { t: 10 } }]);
 });
 
 test('服务：设置写入只动改过的字段', async () => {
@@ -236,26 +236,26 @@ test('服务：更新、编辑、Compose、网络/卷与终端的调用参数', 
 	const calls = [];
 	const c = { Id: 'a'.repeat(64), Name: '/web', Image: 'sha256:old', Config: { Image: 'busybox:stable', Env: ['A=1'], Hostname: 'aaaaaaaaaaaa' }, HostConfig: { NetworkMode: 'bridge', RestartPolicy: { Name: 'no' } }, Mounts: [], NetworkSettings: { Networks: { bridge: {} } } };
 	const replies = {
-		'docker.container.inspect': { code: 200, body: c },
-		'docker.image.inspect': { code: 200, body: { Config: { Env: [] } } },
+		'sight.docker.container.inspect': { code: 200, body: c },
+		'sight.docker.image.inspect': { code: 200, body: { Config: { Env: [] } } },
 		'sight.docker.recreate_start': { task: { kind: 'recreate', state: 'running' } },
 		'sight.docker.compose_start': { task: { kind: 'compose', state: 'running' } },
 		'sight.docker.compose_write': { error: 'invalid_compose' },
 		'sight.docker.terminal_start': { session: { port: 7700, path: '/0123456789abcdef0123456789abcdef/', tls: false } },
-		'docker.volume.prune': { code: 200, body: { VolumesDeleted: ['a', 'b'], SpaceReclaimed: 10 } },
+		'sight.docker.volume.prune': { code: 200, body: { VolumesDeleted: ['a', 'b'], SpaceReclaimed: 10 } },
 	};
 	const svc = createDocker({ call: async (o, m, p) => { calls.push([o, m, p]); return replies[`${o}.${m}`] ?? { code: 204, body: '' }; } }, {});
 	assert.deepEqual(await svc.update(c.Id), { kind: 'recreate', state: 'running' });
 	const [, , upd] = calls.at(-1);
 	assert.equal(upd.mode, 'update');
 	assert.equal(upd.body.Image, 'busybox:stable');
-	assert.deepEqual(calls.find(x => x[1] === 'inspect' && x[0] === 'docker.image')[2], { id: 'sha256:old' });
+	assert.deepEqual(calls.find(x => x[1] === 'inspect' && x[0] === 'sight.docker.image')[2], { id: 'sha256:old' });
 	const { base, form } = await svc.editForm(c.Id);
 	form.env = ['A=2'];
 	form.name = 'web2';
 	await svc.edit(c.Id, base, form);
 	assert.deepEqual([calls.at(-1)[2].mode, calls.at(-1)[2].name, calls.at(-1)[2].body.Env], ['edit', 'web2', ['A=2']]);
-	replies['docker.container.inspect'] = { code: 200, body: { ...c, Config: { ...c.Config, Image: 'sha256:' + 'b'.repeat(64) } } };
+	replies['sight.docker.container.inspect'] = { code: 200, body: { ...c, Config: { ...c.Config, Image: 'sha256:' + 'b'.repeat(64) } } };
 	await assert.rejects(svc.update(c.Id), /image ID/);
 
 	await svc.composeStart('app', 'remove', true);
@@ -263,9 +263,9 @@ test('服务：更新、编辑、Compose、网络/卷与终端的调用参数', 
 	await assert.rejects(svc.composeWrite('app', 'x', true), e => e.reason === 'invalid_compose');
 	assert.deepEqual(calls.at(-1), ['sight.docker', 'compose_write', { name: 'app', content: 'x', create: true }]);
 	assert.deepEqual(await svc.pruneVolumes(), { count: 2, reclaimed: 10 });
-	assert.deepEqual(calls.at(-1), ['docker.volume', 'prune', { query: { filters: '{"all":["true"]}' } }]);
+	assert.deepEqual(calls.at(-1), ['sight.docker.volume', 'prune', { query: { filters: '{"all":["true"]}' } }]);
 	await svc.createVolume('');
-	assert.deepEqual(calls.at(-1), ['docker.volume', 'create', { opts: {} }]);
+	assert.deepEqual(calls.at(-1), ['sight.docker.volume', 'create', { opts: {} }]);
 
 	const r = await svc.terminalStart(c.Id, { protocol: 'http:', hostname: '192.168.1.1' });
 	assert.deepEqual(calls.at(-1), ['sight.docker', 'terminal_start', { id: c.Id, host: '192.168.1.1', tls: false }]);

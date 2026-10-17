@@ -1,5 +1,5 @@
 /*
- * Docker（插件自带的 rpcd 后端）：docker / docker.container / docker.image / docker.network 移植自 dockerman，
+ * Docker（插件自带的 rpcd 后端）：sight.docker / sight.docker.container / sight.docker.image / sight.docker.network 移植自 dockerman 的 docker.*，
  * 把 Docker API 的 HTTP 响应包成 { code, headers, body }：code ≥ 300 视为失败，body.message 为原因；守护进程连不上时 code 为 500。
  * sight.docker 是本插件加的：logs 在设备端解开日志的多路复用流后返回纯文本（dockerd 在其它主机时同样可读）；
  * 拉取镜像、重建容器（更新镜像 / 修改配置）与 Compose 项目操作交给设备端后台任务（*_start，同一时间一个，
@@ -393,17 +393,17 @@ export function createDocker(client, uci) {
 		 * null = 后端对象不存在（插件不完整）；网络、卷、Compose 读取失败时对应字段为 { error }
 		 */
 		async load() {
-			const version = await probe(client, 'docker', 'version');
+			const version = await probe(client, 'sight.docker', 'version');
 			if (!version) return null;
 			if (version.code >= 300) return { reachable: false, error: version.body?.message || '' };
 			const soft = p => p.catch(e => ({ error: e?.message || String(e) }));
 			const [info, containers, images, df, networks, volumes, compose] = await Promise.all([
-				call('docker', 'info'),
-				call('docker.container', 'list', { query: { all: true } }),
-				call('docker.image', 'list', {}),
-				call('docker', 'df').catch(() => null),
-				soft(call('docker.network', 'list', { query: {} })),
-				soft(call('docker.volume', 'list', { query: {} })),
+				call('sight.docker', 'info'),
+				call('sight.docker.container', 'list', { query: { all: true } }),
+				call('sight.docker.image', 'list', {}),
+				call('sight.docker', 'df').catch(() => null),
+				soft(call('sight.docker.network', 'list', { query: {} })),
+				soft(call('sight.docker.volume', 'list', { query: {} })),
 				soft(sight('compose_list')),
 			]);
 			const shaped = shape(containers, images);
@@ -419,31 +419,31 @@ export function createDocker(client, uci) {
 		},
 		async action(id, action) {
 			if (!ACTIONS.includes(action)) throw new Error('Unknown action');
-			await call('docker.container', action, { id, query: action === 'start' ? {} : { t: 10 } });
+			await call('sight.docker.container', action, { id, query: action === 'start' ? {} : { t: 10 } });
 		},
-		async inspect(id) { return detailOf(await call('docker.container', 'inspect', { id, query: {} })); },
+		async inspect(id) { return detailOf(await call('sight.docker.container', 'inspect', { id, query: {} })); },
 		/** 运行中的容器须 force（Docker 先停再删）；volumes 同时删除匿名卷 */
 		async removeContainer(id, { force = false, volumes = false } = {}) {
-			await call('docker.container', 'remove', { id, query: { force, v: volumes } });
+			await call('sight.docker.container', 'remove', { id, query: { force, v: volumes } });
 		},
 		async setRestartPolicy(id, policy) {
 			if (!RESTART_POLICIES.includes(policy)) throw new Error('Unknown restart policy');
-			await call('docker.container', 'update', { id, body: { RestartPolicy: { Name: policy } } });
+			await call('sight.docker.container', 'update', { id, body: { RestartPolicy: { Name: policy } } });
 		},
 		/* 一次即时采样（one-shot：rpcd 在进程内同步调用，不让它等 Docker 隔一秒的两次采样）；CPU 占用由页面前后两次采样相减 */
-		async stats(id) { return call('docker.container', 'stats', { id, query: { stream: false, 'one-shot': true } }); },
-		async removeImage(id) { await call('docker.image', 'remove', { id, query: {} }); },
+		async stats(id) { return call('sight.docker.container', 'stats', { id, query: { stream: false, 'one-shot': true } }); },
+		async removeImage(id) { await call('sight.docker.image', 'remove', { id, query: {} }); },
 		/** 删除所有没有容器使用的镜像（含有标签的），返回释放的字节数 */
 		async pruneImages() {
-			const r = await call('docker.image', 'prune', { query: { filters: JSON.stringify({ dangling: ['false'] }) } });
+			const r = await call('sight.docker.image', 'prune', { query: { filters: JSON.stringify({ dangling: ['false'] }) } });
 			return { reclaimed: r?.SpaceReclaimed || 0 };
 		},
 		/** @returns {Promise<string>} 新容器 ID；start 为 true 时随后启动，启动失败抛出的错误带 created（已建好的容器 ID） */
 		async create(form) {
 			const { query, body } = buildCreate(form);
-			const r = await call('docker.container', 'create', { query, body });
+			const r = await call('sight.docker.container', 'create', { query, body });
 			if (form.start) {
-				try { await call('docker.container', 'start', { id: r.Id, query: {} }); }
+				try { await call('sight.docker.container', 'start', { id: r.Id, query: {} }); }
 				catch (e) { e.created = r.Id; throw e; }
 			}
 			return r.Id;
@@ -464,8 +464,8 @@ export function createDocker(client, uci) {
 		async taskStatus() { const r = await sight('task_status'); return { task: r.task || null, output: r.output || '' }; },
 		/** 重建用的原配置：容器与其镜像的 inspect（镜像已删时不去除镜像默认值） */
 		async recreateBase(id) {
-			const c = await call('docker.container', 'inspect', { id, query: {} });
-			const image = await call('docker.image', 'inspect', { id: c.Image }).catch(() => null);
+			const c = await call('sight.docker.container', 'inspect', { id, query: {} });
+			const image = await call('sight.docker.image', 'inspect', { id: c.Image }).catch(() => null);
 			return { inspect: c, base: recreateBody(c, image) };
 		},
 		/** 编辑：预填表单与重建参数 */
@@ -485,13 +485,13 @@ export function createDocker(client, uci) {
 		},
 
 		/* ---- 网络与卷 ---- */
-		async createNetwork(form) { await call('docker.network', 'create', { body: buildNetwork(form) }); },
-		async removeNetwork(id) { await call('docker.network', 'remove', { id }); },
-		async createVolume(name) { await call('docker.volume', 'create', { opts: name ? { Name: name } : {} }); },
-		async removeVolume(name) { await call('docker.volume', 'remove', { id: name, query: {} }); },
+		async createNetwork(form) { await call('sight.docker.network', 'create', { body: buildNetwork(form) }); },
+		async removeNetwork(id) { await call('sight.docker.network', 'remove', { id }); },
+		async createVolume(name) { await call('sight.docker.volume', 'create', { opts: name ? { Name: name } : {} }); },
+		async removeVolume(name) { await call('sight.docker.volume', 'remove', { id: name, query: {} }); },
 		/** 删除没有容器使用的卷（含有名字的，all=true），返回删除数与释放的字节数 */
 		async pruneVolumes() {
-			const r = await call('docker.volume', 'prune', { query: { filters: JSON.stringify({ all: ['true'] }) } });
+			const r = await call('sight.docker.volume', 'prune', { query: { filters: JSON.stringify({ all: ['true'] }) } });
 			return { count: r?.VolumesDeleted?.length || 0, reclaimed: r?.SpaceReclaimed || 0 };
 		},
 
@@ -526,7 +526,7 @@ export function createDocker(client, uci) {
 		async restartService() {
 			await initAction(client, 'dockerd', 'restart');
 			for (let i = 0; i < 30; i++) {
-				const r = await probe(client, 'docker', 'version').catch(() => null);
+				const r = await probe(client, 'sight.docker', 'version').catch(() => null);
 				if (r && r.code < 300) return;
 				await new Promise(done => setTimeout(done, 1000));
 			}

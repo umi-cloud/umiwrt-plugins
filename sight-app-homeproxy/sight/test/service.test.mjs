@@ -105,10 +105,10 @@ test('域名列表：解析去重；只写有变化的列表，代理开着才�
 	assert.deepEqual(cur, { proxy_list: ['claude.com'], direct_list: [] });
 	calls.length = 0;
 	await svc.saveDomainLists({ proxy_list: ['claude.com'], direct_list: ['nas.example'] }, cur, true);
-	assert.deepEqual(calls, [['luci.homeproxy', 'acllist_write', { type: 'direct_list', content: 'nas.example' }], ['sight', 'setInitAction', { name: 'homeproxy', action: 'reload' }]]);
+	assert.deepEqual(calls, [['sight.homeproxy', 'acllist_write', { type: 'direct_list', content: 'nas.example' }], ['sight', 'setInitAction', { name: 'homeproxy', action: 'reload' }]]);
 	calls.length = 0;
 	await svc.saveDomainLists({ proxy_list: [], direct_list: [] }, cur, false);
-	assert.deepEqual(calls, [['luci.homeproxy', 'acllist_write', { type: 'proxy_list', content: '' }]]);
+	assert.deepEqual(calls, [['sight.homeproxy', 'acllist_write', { type: 'proxy_list', content: '' }]]);
 	await assert.rejects(svc.saveDomainLists({ proxy_list: ['-bad'], direct_list: [] }, cur, false), /Invalid domain/);
 });
 

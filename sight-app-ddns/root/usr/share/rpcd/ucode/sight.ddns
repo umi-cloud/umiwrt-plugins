@@ -4,37 +4,19 @@
 
 'use strict';
 
-import { readfile, readlink, popen, stat, glob, basename } from 'fs';
+import { readfile, popen, stat, glob } from 'fs';
 import { isnan } from 'math';
 import { cursor } from 'uci';
+import { shellquote, init_enabled } from 'sight.rpc';
 
 const uci = cursor();
 
-function init_enabled(name) {
-	for (let path in glob(`/etc/rc.d/[SK][0-9][0-9]${basename(name)}`)) {
-		const ln = readlink(path);
-		const s1 = stat(index(ln, '/') == 0 ? ln : `/etc/rc.d/${ln}`);
-		const s2 = stat(`/etc/init.d/${basename(name)}`);
-
-		if (s1?.inode == s2?.inode && s1?.type == 'file' && s1?.perm?.user_exec)
-			return true;
-	}
-
-	return false;
-}
 const ddns_log_path = '/var/log/ddns';
 const ddns_package_path = '/usr/share/ddns';
 const ddns_run_path = '/var/run/ddns';
 const luci_helper = '/usr/lib/ddns/dynamic_dns_lucihelper.sh';
 const ddns_version_file = '/usr/share/ddns/version';
 
-
-function shellquote(value) {
-	if (value == null)
-		value = '';
-
-	return "'" + replace(value, "'", "'\\''") + "'";
-}
 
 function get_dateformat() {
 	return uci.get('ddns', 'global', 'ddns_dateformat') || '%F %R';

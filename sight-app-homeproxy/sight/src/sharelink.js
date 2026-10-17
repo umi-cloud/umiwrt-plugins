@@ -2,7 +2,7 @@
  * 代理分享链接解析：vless / vmess / trojan / ss / hysteria2(hy2) / tuic / anytls / socks / http(s)。
  * 输出 HomeProxy 节点（uci 'node' 节）的选项；字段名与 HomeProxy 一致，未给出的选项不出现。
  * 不支持的协议或传输方式（如 kcp）、缺少必需字段的链接返回 null，不猜测补全。
- * features 为 luci.homeproxy singbox_get_features 的结果，用于判断 QUIC、uTLS 是否可用。
+ * features 为 sight.homeproxy singbox_get_features 的结果，用于判断 QUIC、uTLS 是否可用。
  */
 
 export const SS_METHODS = ['none', 'aes-128-gcm', 'aes-192-gcm', 'aes-256-gcm', 'chacha20-ietf-poly1305', 'xchacha20-ietf-poly1305',
