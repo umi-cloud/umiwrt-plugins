@@ -1,22 +1,24 @@
 <script>
 	import { onDestroy, tick } from 'svelte';
-	import { t, errorText, client, createPoller, route, navigate, activity, useEditor, requestLeave, editing, uci, pending, saveFlow, createClients, isMac, Card, Switch, Button, Badge, StatusHero, Callout, LogView, Select, Input, Textarea, Checkbox, RadioGroup, SettingRow, DynamicList, Field, Tabs, Drawer, Dialog, FormActions, ErrorSummary, Feedback, Table, Toolbar, DescriptionList, Disclosure, fmtBytes } from '@sight/sdk';
-	import { createHomeProxy, MODES, LOGS, SITES, RESOURCES, ACCESS, DNS_PRESETS, CHINA_DNS_PRESETS, validateSubscriptions, validateRouting, previewLinks, missingResources, DOMAIN_LISTS, parseDomains, validateDomains, LATENCY_BATCH, latencyTone, sortByLatency, CORE_FEATURES, LOG_LEVELS } from './service.js';
+	import { t, errorText, client, route, navigate, activity, useEditor, requestLeave, editing, uci, pending, saveFlow, createClients, isMac, Card, Switch, Button, Badge, StatusHero, Callout, Select, Input, Textarea, Checkbox, RadioGroup, SettingRow, DynamicList, Field, Tabs, Drawer, Dialog, FormActions, ErrorSummary, Feedback, Table, Toolbar, Disclosure } from '@sight/sdk';
+	import { createHomeProxy, MODES, SITES, RESOURCES, ACCESS, DNS_PRESETS, CHINA_DNS_PRESETS, validateSubscriptions, validateRouting, previewLinks, missingResources, DOMAIN_LISTS, parseDomains, validateDomains, LATENCY_BATCH, latencyTone, sortByLatency, localTime } from './service.js';
 	import { nodeGroups, sourceOf, failedSubscriptions, MANUAL, ORPHAN } from './subscription.js';
 	import { TEMPLATES, find, DIRECT, BLOCK } from './routing.js';
 	import NodeForm from './NodeForm.svelte';
 	import SubscriptionTools from './SubscriptionTools.svelte';
 	import DeviceRules from './DeviceRules.svelte';
+	import CoreStatus from './CoreStatus.svelte';
+	import LogsPanel from './LogsPanel.svelte';
 	import CustomRouting from './CustomRouting.svelte';
 
-	/* 顶部状态卡（开关、当前节点、连通性，没在运行时附上原因）常驻；其余按任务分区：节点、分流与 DNS（含规则库）、设备、订阅、sing-box（核心状态、日志、更新）。
-	   节点编辑（NodeForm）、订阅归组与过滤（SubscriptionTools）、自定义分流（CustomRouting）各自成组件，这里只做接入。
+	/* 顶部状态卡（开关、当前节点、连通性，没在运行时附上原因）常驻；其余按任务分区：节点、分流、规则（规则库）、设备、订阅、sing-box（核心状态、更新）、日志。
+	   节点编辑（NodeForm）、订阅归组与过滤（SubscriptionTools）、自定义分流（CustomRouting）、按设备设置（DeviceRules）、
+	   sing-box 分区（CoreStatus）、日志分区（LogsPanel）各自成组件，这里只做接入。
 	   配置保存即生效（带失联回滚）；订阅/规则库更新、连通性检查、清空日志为即时操作。 */
 	const svc = createHomeProxy(client, uci);
 	const clientsSvc = createClients(client, uci);
-	const SECTIONS = ['nodes', 'routing', 'devices', 'subscriptions', 'core'];
-	/* 旧地址：日志并入 sing-box 分区 */
-	const sectionOf = tab => tab === 'logs' ? 'core' : SECTIONS.includes(tab) ? tab : 'nodes';
+	const SECTIONS = ['nodes', 'routing', 'rules', 'devices', 'subscriptions', 'core', 'logs'];
+	const sectionOf = tab => SECTIONS.includes(tab) ? tab : 'nodes';
 	const tabsId = $props.id();
 	let section = $state(sectionOf(route.params.tab));
 	/* 不带 tab 的地址（如从侧栏进入）回到节点分区 */
@@ -27,7 +29,7 @@
 	let notice = $state(null);
 	let busy = $state(false);
 	let alive = true, version = 0, seenDiscard = editing.discarded;
-	onDestroy(() => { alive = false; version++; logPoller.stop(); corePoller.stop(); });
+	onDestroy(() => { alive = false; version++; });
 
 	/* 各分区的编辑草稿；load 后按配置重置 */
 	let subs = $state([]), subsDraft = $state(''), subsBaseline = $state('[]'), subsError = $state('');
@@ -40,8 +42,8 @@
 	let checks = $state({});        // site → undefined（检查中）| true | false | 'error'
 	let updating = $state(false);
 	let resources = $state(null), resourcesError = $state(''), resourceBusy = $state(''), resourceResult = $state({});
-	let logName = $state('homeproxy'), logText = $state(undefined), logError = $state(''), logBusy = $state(false), confirmClean = $state(false);
-	const logTabsId = `${tabsId}-log`;
+	/* sing-box 与日志分区（CoreStatus、LogsPanel）进行中的即时操作，以及要打开的日志 */
+	let coreBusy = $state(false), logBusy = $state(false), logName = $state('homeproxy');
 
 	const dnsChoice = v => DNS_PRESETS.includes(v) ? v : 'custom';
 	const chinaChoice = v => CHINA_DNS_PRESETS.includes(v) ? v : 'custom';
@@ -87,8 +89,8 @@
 	const accessDirty = $derived(!!access && JSON.stringify(access) !== accessBaseline);
 	const importDirty = $derived(!!importing?.text.trim());
 	/* 订阅更新、规则库更新、清空日志都是即时操作：进行中阻止切页 */
-	useEditor(() => ({ dirty: subsDirty || routingDirty || accessDirty || importDirty || domainsDirty, busy: busy || updating || !!resourceBusy || logBusy || domainsBusy || restarting }));
-	const locked = $derived(busy || updating || !!resourceBusy || logBusy || domainsBusy || restarting || activity.busy);
+	useEditor(() => ({ dirty: subsDirty || routingDirty || accessDirty || importDirty || domainsDirty, busy: busy || updating || !!resourceBusy || logBusy || domainsBusy || coreBusy }));
+	const locked = $derived(busy || updating || !!resourceBusy || logBusy || domainsBusy || coreBusy || activity.busy);
 
 	const modeLabel = m => ({ bypass_mainland_china: t('Proxy sites outside mainland China'), gfwlist: t('Proxy blocked sites only (GFWList)'), proxy_mainland_china: t('Proxy mainland China sites only'), global: t('Proxy everything'), custom: t('Custom routing') }[m] || m);
 	const current = $derived(data?.nodes.find(n => n.id === data.mainNode) || null);
@@ -104,10 +106,12 @@
 	});
 	const tabs = $derived([
 		{ value: 'nodes', label: t('Nodes'), count: data?.nodes.length ?? 0 },
-		{ value: 'routing', label: t('Routing & DNS') },
+		{ value: 'routing', label: t('Routing') },
+		{ value: 'rules', label: t('Rules') },
 		{ value: 'devices', label: t('Devices') },
 		{ value: 'subscriptions', label: t('Subscriptions') },
 		{ value: 'core', label: 'sing-box' },
+		{ value: 'logs', label: t('Logs') },
 	]);
 	/* 抽屉为模态，页面顶部的错误被遮挡：抽屉里的写入失败经它说明 */
 	const drawerError = $derived(error || (notice?.tone === 'error' ? notice.text : ''));
@@ -148,10 +152,8 @@
 	async function showDiagnosisLog() {
 		if (diagnosis.log === 'syslog') { await navigate('/logs'); return; }
 		logName = diagnosis.log;
-		section = 'core';
-		await changeSection('core');
-		await tick();
-		document.querySelector('[data-hp-logs]')?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+		section = 'logs';
+		await changeSection('logs');
 	}
 
 	/* --- 节点：导入与删除 --- */
@@ -355,13 +357,11 @@
 		} catch (e) { if (alive) notice = { tone: 'error', text: errorText(e) }; }
 		finally { if (alive) { updating = false; await load(); } }
 	}
-	const pad = n => String(n).padStart(2, '0');
-	const timeText = sec => { const d = new Date(sec * 1000); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`; };
-	const subStatusText = s => s.result === 'error' ? t('Last update (%s) failed: %s', timeText(s.time), s.error || t('unknown error'))
-		: s.result === 'no_nodes' ? t('Last update (%s) fetched no usable nodes; existing nodes were kept.', timeText(s.time))
-		: t('Last updated %s: %d nodes added, %d removed.', timeText(s.time), s.added, s.removed);
+	const subStatusText = s => s.result === 'error' ? t('Last update (%s) failed: %s', localTime(s.time), s.error || t('unknown error'))
+		: s.result === 'no_nodes' ? t('Last update (%s) fetched no usable nodes; existing nodes were kept.', localTime(s.time))
+		: t('Last updated %s: %d nodes added, %d removed.', localTime(s.time), s.added, s.removed);
 	/* 代理开着时进页面就读版本：当前模式依赖的规则库缺失要在顶部提醒 */
-	$effect(() => { if (data && (data.enabled || section === 'routing') && !resources && !resourcesError) loadResources(); });
+	$effect(() => { if (data && (data.enabled || section === 'rules') && !resources && !resourcesError) loadResources(); });
 	const missing = $derived(data?.enabled ? missingResources(data.mode, resources) : []);
 	async function downloadMissing() { for (const r of missing) await updateResource(r); }
 	/* 版本读取失败不显示成「未下载」 */
@@ -383,90 +383,6 @@
 	/* 规则库版本是时间戳（YYYYMMDDhhmm，部分带秒），按日期时间显示 */
 	const versionText = v => /^\d{12}(\d{2})?$/.test(v || '') ? `${v.slice(0, 4)}-${v.slice(4, 6)}-${v.slice(6, 8)} ${v.slice(8, 10)}:${v.slice(10, 12)}` : v;
 
-	/* --- sing-box 核心：运行状态、编译特性、重启；检查与更新为后台任务，进行中每 2 秒轮询 --- */
-	let core = $state(null), coreUpdate = $state(null), coreError = $state('');
-	let restarting = $state(false), confirmRestart = $state(false), confirmUpgrade = $state(false);
-	async function loadCore() {
-		coreError = '';
-		try {
-			const [status, update] = await Promise.all([svc.clientStatus(), svc.coreUpdate()]);
-			if (!alive) return;
-			const finished = coreUpdate?.kind === 'running' && update.kind !== 'running';
-			core = status; coreUpdate = update;
-			/* 更新完成后版本号与运行状态都变了 */
-			if (finished) await load();
-		} catch (e) { if (alive) coreError = errorText(e); }
-	}
-	/* 进入分区和配置重载（开关代理等）后都重读 */
-	$effect(() => { if (section === 'core' && data) loadCore(); });
-	const corePoller = createPoller(loadCore, 2000);
-	$effect(() => { if (section === 'core' && coreUpdate?.kind === 'running') corePoller.start(); else corePoller.stop(); });
-	async function startCore(action) {
-		confirmUpgrade = false;
-		if (locked) return;
-		notice = null;
-		try { await svc.coreStart(action); } catch (e) { if (alive) notice = { tone: 'error', text: errorText(e) }; }
-		if (alive) await loadCore();
-	}
-	async function restart() {
-		if (locked) return;
-		restarting = true; notice = null;
-		try { await svc.restart(); if (alive) notice = { tone: 'success', text: t('HomeProxy restarted.') }; }
-		catch (e) { if (alive) notice = { tone: 'error', text: errorText(e) }; }
-		finally { if (alive) { restarting = false; confirmRestart = false; await load(); } }
-	}
-	const durationText = sec => {
-		const d = Math.floor(sec / 86400), h = Math.floor(sec % 86400 / 3600), m = Math.floor(sec % 3600 / 60);
-		return d ? t('%d d %d h', d, h) : h ? t('%d h %d min', h, m) : t('%d min', Math.max(1, m));
-	};
-	const runText = () => !data.enabled ? t('Not running (proxy is off)') : core?.running ? t('Running') : t('Not running');
-	const featureLabel = f => ({ with_quic: 'QUIC', with_utls: 'uTLS', with_wireguard: 'WireGuard', hp_has_tproxy: 'TProxy', hp_has_tun: 'TUN' }[f]);
-	const featureText = (f, ok) => ok ? {
-		with_quic: t('Needed by Hysteria2 and TUIC nodes.'), with_utls: t('Needed by VLESS Reality nodes and TLS fingerprints.'), with_wireguard: t('Needed by WireGuard nodes.'),
-		hp_has_tproxy: t('Kernel support for sending UDP traffic through the proxy.'), hp_has_tun: t('Kernel support for TUN mode.'),
-	}[f] : {
-		with_quic: t('Hysteria2 and TUIC nodes cannot be used. Install a sing-box build with QUIC support.'), with_utls: t('VLESS Reality nodes and TLS fingerprints cannot be used. Install a sing-box build with uTLS support.'),
-		with_wireguard: t('WireGuard nodes cannot be used. Install a sing-box build with WireGuard support.'), hp_has_tproxy: t('UDP traffic cannot go through the proxy. Install kmod-nft-tproxy.'), hp_has_tun: t('TUN mode cannot be used. Install kmod-tun.'),
-	}[f];
-	const updateText = u => ({
-		idle: t('Not checked yet.'),
-		running: u.action === 'upgrade' ? t('Updating sing-box…') : t('Checking for updates…'),
-		available: t('Version %s is available (installed: %s).', u.version, u.current),
-		latest: t('Up to date (checked %s).', timeText(u.time ?? 0)),
-		upgraded: u.restarted ? t('Updated to %s. HomeProxy was restarted to use it.', u.version) : t('Updated to %s. It is used the next time the proxy starts.', u.version),
-		failed: u.action === 'upgrade' ? t('The update failed.') : t('Checking for updates failed.'),
-	}[u.kind]);
-
-	/* --- 日志 --- */
-	let logRequest = 0;
-	/* sing-box 日志级别：改动随配置应用重载 HomeProxy；应用失败或被放弃时选择框回到已保存的值 */
-	const logLevelLabel = l => ({ error: t('Errors only'), warn: t('Warnings (default)'), info: t('Info'), debug: t('Debug') }[l]);
-	let logLevel = $state('warn');
-	$effect(() => { if (data) logLevel = data.logLevel; });
-	async function setLogLevel(level) {
-		if (level === data.logLevel) return;
-		const ok = await write(() => svc.setLogLevel(level), t('Log level set to %s.', logLevelLabel(level)));
-		if (!ok && alive) logLevel = data.logLevel;
-	}
-	/* quiet：跟随时的定时刷新，不先清空成加载中 */
-	async function loadLog(quiet = false) {
-		const request = ++logRequest, name = logName;
-		if (!quiet) { logText = undefined; logError = ''; }
-		try { const text = await svc.log(name); if (alive && request === logRequest) { logText = text; logError = ''; } }
-		catch (e) { if (alive && request === logRequest) { logText = null; logError = errorText(e); } }
-	}
-	$effect(() => { if (section === 'core') { logName; loadLog(); } });
-	/* 跟随：停留在日志分区时每 5 秒刷新当前日志 */
-	let follow = $state(false);
-	const logPoller = createPoller(() => loadLog(true), 5000);
-	$effect(() => { if (follow && section === 'core') logPoller.start(); else logPoller.stop(); });
-	/* 清空日志不可撤销：确认后执行，期间锁定其它操作 */
-	async function cleanLog() {
-		if (locked) return;
-		logBusy = true;
-		try { await svc.cleanLog(logName); } catch (e) { if (alive) notice = { tone: 'error', text: errorText(e) }; }
-		finally { if (alive) { logBusy = false; confirmClean = false; loadLog(); } }
-	}
 </script>
 
 {#snippet nodeContent(raw, n, colIndex)}
@@ -485,21 +401,6 @@
 	{#if !nodeUse(n) && !nodeBusy(n)}<Button size="compact" disabled={locked} onclick={() => removing = n} aria-label={t('Delete node %s', n.label)}>{t('Delete')}</Button>
 	{:else if nodeUse(n)}<span class="muted">{t('In use')}</span>{/if}
 {/snippet}
-
-<Dialog open={confirmRestart} busy={restarting} title={t('Restart HomeProxy?')} confirmLabel={t('Restart')} cancelLabel={t('Cancel')}
-	onconfirm={restart} onclose={() => { if (!restarting) confirmRestart = false; }}>
-	{t('The proxy stops for a few seconds and open connections are dropped.')}
-</Dialog>
-
-<Dialog open={confirmUpgrade} title={t('Update sing-box to %s?', coreUpdate?.version ?? '')} confirmLabel={t('Update')} cancelLabel={t('Cancel')}
-	onconfirm={() => startCore('upgrade')} onclose={() => confirmUpgrade = false}>
-	{data?.enabled ? t('The new version is downloaded and installed, then HomeProxy restarts. The proxy stops for a few seconds.') : t('The new version is downloaded and installed. It is used the next time the proxy is turned on.')}
-</Dialog>
-
-<Dialog open={confirmClean} tone="danger" busy={logBusy} title={t('Clear the %s log?', logName === 'homeproxy' ? t('Service') : 'sing-box')} confirmLabel={t('Clear log')} cancelLabel={t('Cancel')}
-	onconfirm={cleanLog} onclose={() => { if (!logBusy) confirmClean = false; }}>
-	{t('The log contents are deleted and cannot be restored.')}
-</Dialog>
 
 <Dialog open={!!removing} tone="danger" busy={locked} title={t('Delete node %s?', removing?.label ?? '')} confirmLabel={t('Delete')} cancelLabel={t('Cancel')}
 	onconfirm={removeNode} onclose={() => { if (!busy) removing = null; }}>
@@ -579,11 +480,11 @@
 			</Card>
 		</div>
 
-		<!-- 分流与 DNS -->
+		<!-- 分流 -->
 		<div id={`${tabsId}-panel-1`} role="tabpanel" aria-labelledby={`${tabsId}-tab-1`} hidden={section !== 'routing'} tabindex="0">
 			{#if routing}
-				<Card title={t('Routing')}>
-					<form class="form" onsubmit={saveRouting} aria-label={t('Routing & DNS')}>
+				<Card>
+					<form class="form" onsubmit={saveRouting} aria-label={t('Routing')}>
 						<ErrorSummary errors={routingErrors} bind:this={routingSummary} />
 						<SettingRow id="hp-mode" label={t('What goes through the proxy')} description={routing.mode === 'custom' ? t('Your own rules decide where each kind of traffic goes. Set them up below.') : t('Traffic not covered goes out directly.')}>
 							<Select id="hp-mode" aria-describedby="hp-mode-description" bind:value={routing.mode} disabled={locked} aria-label={t('What goes through the proxy')}>
@@ -662,23 +563,6 @@
 					</form>
 				</Card>
 			{/if}
-			<div class="domains">
-				<Card title={t('Routing rule data')}>
-					<p class="muted lead">{t('Address and domain lists that decide what goes direct. Updating downloads the latest lists.')}</p>
-					{#if resourcesError}<Feedback tone="error" message={t('Rule data versions could not be read: %s', resourcesError)} onretry={loadResources} compact />{/if}
-					<ul class="resources">
-						{#each RESOURCES as r}
-							<li data-resource={r}>
-								<div class="resource-copy">
-									<strong>{resourceLabel(r)}</strong>
-									<span class="muted">{[resourcesError ? t('Unknown') : resources === null ? t('Loading…') : resources[r] ? t('Version %s', versionText(resources[r])) : t('Not downloaded'), resourceResult[r] ? resultText(resourceResult[r]) : ''].filter(Boolean).join(' · ')}</span>
-								</div>
-								<Button size="compact" disabled={locked} onclick={() => updateResource(r)}>{resourceBusy === r ? t('Updating…') : t('Update')}</Button>
-							</li>
-						{/each}
-					</ul>
-				</Card>
-			</div>
 			{#if custom}
 				<CustomRouting {data} {svc} {locked} {write} error={drawerError} />
 			{:else}
@@ -703,8 +587,27 @@
 			{/if}
 		</div>
 
+		<!-- 规则：分流用的地址与域名列表 -->
+		<div id={`${tabsId}-panel-2`} role="tabpanel" aria-labelledby={`${tabsId}-tab-2`} hidden={section !== 'rules'} tabindex="0">
+			<Card title={t('Routing rule data')}>
+				<p class="muted lead">{t('Address and domain lists that decide what goes direct. Updating downloads the latest lists.')}</p>
+				{#if resourcesError}<Feedback tone="error" message={t('Rule data versions could not be read: %s', resourcesError)} onretry={loadResources} compact />{/if}
+				<ul class="resources">
+					{#each RESOURCES as r}
+						<li data-resource={r}>
+							<div class="resource-copy">
+								<strong>{resourceLabel(r)}</strong>
+								<span class="muted">{[resourcesError ? t('Unknown') : resources === null ? t('Loading…') : resources[r] ? t('Version %s', versionText(resources[r])) : t('Not downloaded'), resourceResult[r] ? resultText(resourceResult[r]) : ''].filter(Boolean).join(' · ')}</span>
+							</div>
+							<Button size="compact" disabled={locked} onclick={() => updateResource(r)}>{resourceBusy === r ? t('Updating…') : t('Update')}</Button>
+						</li>
+					{/each}
+				</ul>
+			</Card>
+		</div>
+
 		<!-- 设备 -->
-		<div id={`${tabsId}-panel-2`} role="tabpanel" aria-labelledby={`${tabsId}-tab-2`} hidden={section !== 'devices'} tabindex="0">
+		<div id={`${tabsId}-panel-3`} role="tabpanel" aria-labelledby={`${tabsId}-tab-3`} hidden={section !== 'devices'} tabindex="0">
 			{#if access}
 			<div class="stack">
 				<Card>
@@ -743,7 +646,7 @@
 		</div>
 
 		<!-- 订阅 -->
-		<div id={`${tabsId}-panel-3`} role="tabpanel" aria-labelledby={`${tabsId}-tab-3`} hidden={section !== 'subscriptions'} tabindex="0">
+		<div id={`${tabsId}-panel-4`} role="tabpanel" aria-labelledby={`${tabsId}-tab-4`} hidden={section !== 'subscriptions'} tabindex="0">
 			<div class="stack">
 				<Card title={t('Subscriptions')}>
 					<form class="form" onsubmit={saveSubs} aria-label={t('Subscriptions')}>
@@ -769,77 +672,14 @@
 			</div>
 		</div>
 
-		<!-- sing-box：核心状态、日志、更新、功能支持 -->
-		<div id={`${tabsId}-panel-4`} role="tabpanel" aria-labelledby={`${tabsId}-tab-4`} hidden={section !== 'core'} tabindex="0">
-			<div class="stack">
-				<Card title="sing-box">
-					{#if coreError}<Feedback tone="error" message={t('sing-box status could not be read: %s', coreError)} onretry={loadCore} compact />{/if}
-					<div class="core" data-hp-core={core?.running ? 'running' : 'stopped'}>
-						<DescriptionList columns={4} items={[
-							{ label: t('Version'), value: data.version || '-' },
-							{ label: t('Status'), value: runText() },
-							{ label: t('Running for'), value: core?.running && core.uptime != null ? durationText(core.uptime) : '-' },
-							{ label: t('Memory'), value: core?.running && core.memory ? fmtBytes(core.memory) : '-' },
-						]} />
-						<Button disabled={locked || !data.enabled || coreUpdate?.kind === 'running'} onclick={() => confirmRestart = true}>{restarting ? t('Restarting…') : t('Restart')}</Button>
-					</div>
-				</Card>
-				<Card title={t('Logs')}>
-					<div class="log-anchor" data-hp-logs></div>
-					<div class="log-tools">
-						<Tabs id={logTabsId} label={t('Logs')} size="compact" items={LOGS.map(l => ({ value: l, label: l === 'homeproxy' ? t('Service') : 'sing-box' }))} bind:value={logName} />
-						<span class="log-actions">
-							{#if logName === 'sing-box-c'}
-								<Select size="compact" bind:value={logLevel} disabled={locked} aria-label={t('Log level')} title={t('Changing the level reloads HomeProxy. Use info or debug while troubleshooting, then set it back to warn.')}
-									onchange={e => setLogLevel(e.currentTarget.value)} data-hp-log-level>
-									{#each LOG_LEVELS as l}<option value={l}>{logLevelLabel(l)}</option>{/each}
-									{#if !LOG_LEVELS.includes(data.logLevel)}<option value={data.logLevel}>{data.logLevel}</option>{/if}
-								</Select>
-							{/if}
-							<span class="follow"><Switch checked={follow} aria-label={t('Follow')} onchange={on => follow = on} /><span aria-hidden="true">{t('Follow')}</span></span>
-							<Button size="compact" onclick={() => confirmClean = true} disabled={locked || !logText}>{t('Clear log')}</Button>
-							<Button size="compact" onclick={loadLog} disabled={logText === undefined}>{t('Refresh')}</Button>
-						</span>
-					</div>
-					{#each LOGS as l, index (l)}
-						<div id={`${logTabsId}-panel-${index}`} role="tabpanel" aria-labelledby={`${logTabsId}-tab-${index}`} hidden={logName !== l}>
-							{#if logName === l}
-								{#if logError}<Feedback tone="error" message={t('Log could not be read: %s', logError)} onretry={loadLog} compact />
-								{:else if logText === undefined}<Feedback tone="loading" message={t('Loading…')} compact />
-								{:else if logText === null}<Feedback tone="empty" message={t('No log yet. It appears after the service has run.')} compact />
-								{:else if !logText.trim()}<Feedback tone="empty" message={t('Log is empty')} compact />
-								{:else}<LogView text={logText} label={t('Log contents')} tail />{/if}
-							{/if}
-						</div>
-					{/each}
-				</Card>
-				<Card title={t('Updates')}>
-					{#if !coreUpdate}<Feedback tone="loading" message={t('Loading…')} compact />
-					{:else if coreUpdate.kind === 'unsupported'}<Feedback tone="info" message={t('This device does not use apk, so sing-box cannot be updated here.')} compact />
-					{:else}
-						<div class="core-update" data-hp-core-update={coreUpdate.kind}>
-							<span class={coreUpdate.kind === 'failed' ? 'danger' : coreUpdate.kind === 'available' || coreUpdate.kind === 'upgraded' ? 'strong' : 'muted'}>{updateText(coreUpdate)}</span>
-							<span class="log-actions">
-								<Button size="compact" disabled={locked || coreUpdate.kind === 'running'} onclick={() => startCore('check')}>{coreUpdate.kind === 'running' && coreUpdate.action === 'check' ? t('Checking…') : t('Check for updates')}</Button>
-								{#if coreUpdate.kind === 'available'}<Button variant="primary" size="compact" disabled={locked} onclick={() => confirmUpgrade = true}>{t('Update to %s', coreUpdate.version)}</Button>{/if}
-							</span>
-						</div>
-						{#if coreUpdate.kind === 'failed' && coreUpdate.output.trim()}<LogView text={coreUpdate.output} label={t('Output')} tail maxHeight="16rem" />{/if}
-						<p class="muted core-note">{t('Updates come from the device’s package sources. If the proxy stops working after an update, the reason is shown at the top of this page.')}</p>
-					{/if}
-				</Card>
-				<Card title={t('Supported features')}>
-					<ul class="resources">
-						{#each CORE_FEATURES as f}
-							{@const ok = !!data.features[f]}
-							<li data-feature={f} data-ok={ok ? 'yes' : 'no'}>
-								<div class="resource-copy"><strong>{featureLabel(f)}</strong><span class="muted">{featureText(f, ok)}</span></div>
-								<Badge tone={ok ? 'success' : 'danger'}>{ok ? t('Available') : t('Missing')}</Badge>
-							</li>
-						{/each}
-					</ul>
-				</Card>
-			</div>
+		<!-- sing-box：核心状态、更新、功能支持 -->
+		<div id={`${tabsId}-panel-5`} role="tabpanel" aria-labelledby={`${tabsId}-tab-5`} hidden={section !== 'core'} tabindex="0">
+			<CoreStatus {data} {svc} {locked} active={section === 'core'} bind:busy={coreBusy} onnotice={n => notice = n} onreload={load} />
+		</div>
+
+		<!-- 日志 -->
+		<div id={`${tabsId}-panel-6`} role="tabpanel" aria-labelledby={`${tabsId}-tab-6`} hidden={section !== 'logs'} tabindex="0">
+			<LogsPanel {data} {svc} {locked} {write} active={section === 'logs'} bind:logName bind:busy={logBusy} onnotice={n => notice = n} />
 		</div>
 
 		<Drawer error={drawerError} open={!!nodeEditing} title={nodeEditing?.id ? t('Edit node %s', nodeEditing.label) : t('Add node')} onclose={closeNode}>
@@ -899,19 +739,9 @@
 	.resources li:first-child { border-top: 0; padding-top: 0; }
 	.resource-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 	.resource-copy strong { font-weight: var(--fw-medium); color: var(--heading-color); }
-	.log-tools { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); flex-wrap: wrap; margin-bottom: var(--sp-3); }
-	.log-actions { display: flex; align-items: center; gap: var(--sp-2); }
-	.follow { display: inline-flex; align-items: center; gap: var(--sp-1); margin-right: var(--sp-2); font-size: var(--fs-sm); }
 	.sub-status { margin: var(--sp-3) 0 0; }
 	.group { margin: 0; padding-top: var(--sp-2); font-size: var(--fs-base); font-weight: var(--fw-semibold); color: var(--heading-color); }
 	.advanced { display: flex; flex-direction: column; gap: var(--sp-5); padding-top: var(--sp-2); }
-	.log-anchor { scroll-margin-top: var(--sp-6); }
-	.core { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-4); flex-wrap: wrap; }
-	.core :global(.dl) { flex: 1; min-width: min(100%, 28rem); }
-	.core-update { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); flex-wrap: wrap; margin-bottom: var(--sp-3); font-size: var(--fs-sm); }
-	.core-update .strong { font-weight: var(--fw-medium); color: var(--heading-color); }
-	.core-update .danger { color: var(--status-danger-text); }
-	.core-note { margin: var(--sp-3) 0 0; }
 	.preview { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--sp-2); max-height: 40vh; overflow: auto; }
 	.preview li { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; font-size: var(--fs-sm); }
 	.clip { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }

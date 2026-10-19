@@ -61,7 +61,7 @@ const bySection = (type, label) => sh(`uci -X show homeproxy | grep -E "^homepro
 try {
 	await browser(async ({ page, waitFor, fill, clickText, go, apply, confirmDialog, screenshot }) => {
 		section('HomeProxy');
-		const hpTab = async tab => { await go(`#/homeproxy?tab=${tab}`, `!!document.querySelector('[data-homeproxy]') && document.querySelector('.workspace-tabs [aria-selected=true]')?.id.endsWith('-tab-${['nodes', 'routing', 'devices', 'subscriptions', 'core'].indexOf(tab)}')`); };
+		const hpTab = async tab => { await go(`#/homeproxy?tab=${tab}`, `!!document.querySelector('[data-homeproxy]') && document.querySelector('.workspace-tabs [aria-selected=true]')?.id.endsWith('-tab-${['nodes', 'routing', 'rules', 'devices', 'subscriptions', 'core', 'logs'].indexOf(tab)}')`); };
 		/* 在容器里直接改过配置后重载页面，让页面读到新配置 */
 		const reloadPage = async tab => { await page.evaluate(`location.reload()`); await new Promise(r => setTimeout(r, 1500)); await waitFor(`!!document.querySelector('[data-homeproxy]')`, '重载页面'); await hpTab(tab); };
 		await go('#/homeproxy', `!!document.querySelector('[data-homeproxy]')`);
@@ -80,8 +80,7 @@ try {
 		await waitFor(`document.querySelector('[data-hp-sort]')?.value === 'latency'`, '按延迟排序');
 		check(await page.evaluate(`document.querySelector('[data-node="sighttest"] [data-latency]').dataset.tone === 'failed'`), '测完自动按延迟排序，失败结果标为红色');
 		/* 不带 tab 的地址（侧栏入口）回到节点分区 */
-		await go('#/homeproxy?tab=logs', `document.querySelector('.workspace-tabs [aria-selected=true]')?.id.endsWith('-tab-4') && !!document.querySelector('[data-hp-logs]')`);
-		check(true, '旧地址 ?tab=logs 打开 sing-box 分区，日志在其中');
+		await go('#/homeproxy?tab=logs', `document.querySelector('.workspace-tabs [aria-selected=true]')?.id.endsWith('-tab-6')`);
 		await go('#/homeproxy', `document.querySelector('.workspace-tabs [aria-selected=true]')?.id.endsWith('-tab-0')`);
 		check(true, '从其它分区回到 HomeProxy 入口时显示节点分区');
 
@@ -159,16 +158,16 @@ try {
 		await fill({ 'hp-mode': 'global', 'hp-udp': 'nil', 'hp-dns': 'custom' });
 		await waitFor(`!!document.getElementById('hp-dns-custom')`, '自定义 DNS 输入');
 		await fill({ 'hp-dns-custom': 'dns.google' });
-		await page.evaluate(`document.querySelector('form[aria-label="Routing & DNS"]').requestSubmit()`);
+		await page.evaluate(`document.querySelector('form[aria-label="Routing"]').requestSubmit()`);
 		await waitFor(`document.getElementById('hp-dns-custom')?.getAttribute('aria-invalid') === 'true'`, 'DNS 校验');
 		check(true, '不带协议前缀的主机名 DNS 被拦截');
 		await fill({ 'hp-dns-custom': 'tls://dns.google' });
-		await page.evaluate(`document.querySelector('form[aria-label="Routing & DNS"]').requestSubmit()`);
+		await page.evaluate(`document.querySelector('form[aria-label="Routing"]').requestSubmit()`);
 		await apply('分流与 DNS');
 		check(sh('uci get homeproxy.config.routing_mode').trim() === 'global' && sh('uci get homeproxy.config.main_udp_node').trim() === 'nil' && sh('uci get homeproxy.config.dns_server').trim() === 'tls://dns.google', '分流模式、UDP 直连与自定义 DNS 写入');
 
 		/* 走代理的端口：自定义列表校验后写入；全部端口即删除 routing_port；最后恢复常用端口 */
-		const routingForm = `document.querySelector('form[aria-label="Routing & DNS"]')`;
+		const routingForm = `document.querySelector('form[aria-label="Routing"]')`;
 		await fill({ 'hp-ports': 'custom' });
 		await waitFor(`!!document.getElementById('hp-ports-custom')`, '自定义端口输入');
 		await fill({ 'hp-ports-custom': '80;443' });
@@ -263,8 +262,8 @@ try {
 		await page.evaluate(`document.querySelector('[role=switch][aria-label="Update through the proxy"]').click()`);
 		await apply('经代理更新');
 		check(sh('uci get homeproxy.subscription.update_via_proxy').trim() === '1', '经代理更新订阅开关写入');
-		/* 规则库在「分流与 DNS」分区 */
-		await hpTab('routing');
+		/* 规则库在「规则」分区 */
+		await hpTab('rules');
 		await waitFor(`!!document.querySelector('[role=tabpanel]:not([hidden]) [data-resource="gfw_list"]') && !/Loading/.test(document.querySelector('[data-resource="gfw_list"]').textContent)`, '规则库版本');
 		await clickText('[data-resource="gfw_list"] button', 'Update');
 		await waitFor(`/Updated|Already up to date|An update is already running|Update failed/.test(document.querySelector('[data-resource="gfw_list"]').textContent)`, '规则库更新', 180000);
@@ -331,7 +330,7 @@ try {
 		await fill({ 'hp-mode': 'custom' });
 		await waitFor(`!!document.querySelector('input[name=hp-template][value=bypass_china]')`, '模板选择');
 		await page.evaluate(`document.querySelector('input[name=hp-template][value=bypass_china]').click()`);
-		await page.evaluate(`document.querySelector('form[aria-label="Routing & DNS"]').requestSubmit()`);
+		await page.evaluate(`document.querySelector('form[aria-label="Routing"]').requestSubmit()`);
 		await apply('切换到自定义分流');
 		check(uget('config.routing_mode') === 'custom' && uget('routing.default_outbound') === 'sight_proxy' && uget('sight_proxy.node') === 'sighttest' && uget('dns.default_server') === 'sight_dns_remote'
 			&& uget('sight_cn_sites.rule_set') === 'sight_geosite_cn' && uget('sight_dns_cn.server') === 'sight_dns_china', '切到自定义：出站、规则集、规则、DNS 按模板建立，默认出站沿用主节点', sh('uci show homeproxy | grep -E "sight_|routing\\.|dns\\."'));
@@ -455,13 +454,13 @@ try {
 
 		/* 自定义分流下仍可设置走代理的端口（防火墙同样按它过滤） */
 		await fill({ 'hp-ports': 'all' });
-		await page.evaluate(`document.querySelector('form[aria-label="Routing & DNS"]').requestSubmit()`);
+		await page.evaluate(`document.querySelector('form[aria-label="Routing"]').requestSubmit()`);
 		await apply('自定义分流下的端口');
 		check(uget('config.routing_mode') === 'custom' && uget('config.routing_port') === '', '自定义分流模式下保存走代理的端口');
 
 		/* 切回预设模式：主节点取默认出站使用的节点，自定义配置原样保留 */
 		await fill({ 'hp-mode': 'global' });
-		await page.evaluate(`document.querySelector('form[aria-label="Routing & DNS"]').requestSubmit()`);
+		await page.evaluate(`document.querySelector('form[aria-label="Routing"]').requestSubmit()`);
 		await apply('切回全部走代理');
 		check(uget('config.routing_mode') === 'global' && uget('config.main_node') === 'sighttest' && uget(`${chain}.node`) === manual, '切回预设模式：主节点沿用，自定义配置保留');
 
@@ -477,9 +476,9 @@ try {
 		await screenshot('homeproxy-diagnosis');
 		await clickText('[data-hp-diagnosis] button', 'View log');
 		await waitFor(`/wrong client configuration detected/.test(document.querySelector('pre.log')?.textContent || '')`, '诊断直达日志');
-		check(await page.evaluate(`document.querySelector('.workspace-tabs [aria-selected=true]')?.id.endsWith('-tab-4')`), '「查看日志」切到 sing-box 分区的服务日志');
+		check(await page.evaluate(`document.querySelector('.workspace-tabs [aria-selected=true]')?.id.endsWith('-tab-6')`), '「查看日志」切到日志分区的服务日志');
 		sh(`uci set homeproxy.sighttest.type=socks; uci -q delete homeproxy.sighttest.shadowsocks_encrypt_method; uci -q delete homeproxy.sighttest.password; uci commit homeproxy; /etc/init.d/homeproxy restart >/dev/null 2>&1; true`);
-		await reloadPage('core');
+		await reloadPage('logs');
 		check(await page.evaluate(`!document.querySelector('[data-hp-diagnosis]')`), '恢复后不再显示启动失败原因');
 
 		/* sing-box 核心：代理开着时显示运行时长与内存；功能支持；重启；检查更新（结果取决于容器网络与软件源） */
@@ -499,7 +498,7 @@ try {
 		check(true, `检查更新给出结果：${await page.evaluate(`document.querySelector('[data-hp-core-update]').textContent.trim()`)}`);
 		await screenshot('homeproxy-core');
 
-		await hpTab('core');
+		await hpTab('logs');
 		await waitFor(`!!document.querySelector('[role=tabpanel]:not([hidden]) [role=tabpanel]:not([hidden]) :is(pre, .feedback:not([data-tone=loading]))')`, '日志');
 		/* 日志级别：在 sing-box 日志旁调整，随配置应用 */
 		await clickText('.log-tools [role=tab]', 'sing-box');

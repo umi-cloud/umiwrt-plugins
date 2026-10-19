@@ -44,7 +44,7 @@
 	<form class="form" onsubmit={save} aria-label={t('Per-device rules')} data-hp-device-rules>
 		<p class="muted">{t('Give game consoles, TV boxes and similar devices their own way of using the proxy. They still need to use the proxy according to the setting above.')}</p>
 		<ul class="hints muted">
-			<li><strong>{ruleLabel('gaming')}</strong>: {t('Traffic from the device that goes through the proxy is not limited to the ports set under Routing & DNS. Use it for games and apps on unusual ports.')}</li>
+			<li><strong>{ruleLabel('gaming')}</strong>: {t('Traffic from the device that goes through the proxy is not limited to the ports set under Routing. Use it for games and apps on unusual ports.')}</li>
 			<li><strong>{ruleLabel('global')}</strong>: {t('The routing mode is ignored for the device, so all of its traffic uses the proxy. Not used with custom routing.')}</li>
 		</ul>
 		{#if rules.length}

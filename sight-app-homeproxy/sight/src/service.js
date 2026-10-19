@@ -116,6 +116,12 @@ export function coreUpdateState(r) {
 	return task.latest ? { kind: 'available', version: task.latest, current: task.current, time: task.finished } : { kind: 'latest', time: task.finished };
 }
 
+/** 纯函数：Unix 秒 → 浏览器本地时间 YYYY-MM-DD hh:mm */
+export function localTime(sec) {
+	const d = new Date(sec * 1000);
+	return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 export const ACCESS = ['disabled', 'listed_only', 'except_listed'];
 /*
  * 按设备的规则：gaming（游戏模式）该设备走代理的流量不受端口限制；global（全局代理）不按分流模式区分、全部走代理，

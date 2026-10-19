@@ -89,7 +89,6 @@
 	"Recognized links": "识别结果",
 	"Resolves mainland China domains so they go out directly.": "解析中国大陆域名，使其直连。",
 	"Resolves names for proxied traffic. Plain addresses use UDP; tcp://, tls:// and https:// addresses are also accepted.": "为走代理的流量解析域名。纯地址使用 UDP，也可填写 tcp://、tls://、https:// 地址。",
-	"Routing & DNS": "分流与 DNS",
 	"Routing rule data": "分流规则库",
 	"Rules by IP address already in the configuration are kept unchanged.": "配置中已有的按 IP 规则保持不变。",
 	"Same as main node": "同主节点",
@@ -525,7 +524,6 @@
 	"All ports through the proxy": "不限端口",
 	"Everything through the proxy": "全部走代理",
 	"Give game consoles, TV boxes and similar devices their own way of using the proxy. They still need to use the proxy according to the setting above.": "给游戏机、电视盒子等设备单独设置走代理的方式。这些设备仍需按上面的设置使用代理才会生效。",
-	"Traffic from the device that goes through the proxy is not limited to the ports set under Routing & DNS. Use it for games and apps on unusual ports.": "该设备走代理的流量不受「分流与 DNS」里端口设置的限制，适合游戏和使用非常用端口的应用。",
 	"The routing mode is ignored for the device, so all of its traffic uses the proxy. Not used with custom routing.": "该设备不按分流模式区分国内外，所有流量都走代理。自定义分流模式下不生效。",
 	"Rule for %s": "%s 的规则",
 	"Remove %s": "移除 %s",
@@ -547,5 +545,6 @@
 	"Only IPv4 traffic is proxied, and DNS answers for proxied lookups contain only IPv4 addresses. Turn this off if your uplink has no IPv6 or IPv6 connections fail.": "只代理 IPv4 流量，经代理解析的域名只返回 IPv4 地址。上联没有 IPv6 或 IPv6 连接异常时关闭此项。",
 	"Routing": "分流",
 	"DNS": "DNS",
-	"UDP traffic, ports and IPv6": "UDP 流量、走代理的端口与 IPv6"
+	"UDP traffic, ports and IPv6": "UDP 流量、走代理的端口与 IPv6",
+	"Traffic from the device that goes through the proxy is not limited to the ports set under Routing. Use it for games and apps on unusual ports.": "该设备走代理的流量不受「分流」里端口设置的限制，适合游戏和使用非常用端口的应用。"
 }
