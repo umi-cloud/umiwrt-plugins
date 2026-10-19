@@ -1,0 +1,50 @@
+#!/bin/sh
+# 由 sight.homeproxy 的 core_start 在后台启动：检查或更新 sing-box，结果写回 /tmp/sight-homeproxy/core.json
+# 参数：动作（check | upgrade） 开始时间
+DIR=/tmp/sight-homeproxy
+action="$1" started="$2"
+
+state() {
+	printf '{"action":"%s","state":"%s","started":%s,"pid":%s%s}\n' \
+		"$action" "$1" "$started" "$$" "$2" > "$DIR/core.json.tmp"
+	mv "$DIR/core.json.tmp" "$DIR/core.json"
+}
+installed() {
+	apk query --installed --network=no --format json --fields version sing-box 2>/dev/null | jsonfilter -e '@[0].version'
+}
+client_running() {
+	[ "$(ubus call service list '{"name":"homeproxy"}' 2>/dev/null | jsonfilter -e '@.homeproxy.instances["sing-box-c"].running')" = "true" ]
+}
+
+state running ""
+current="$(installed)"
+case "$action" in
+	check)
+		apk update
+		rc=$?
+		# 有新版时模拟升级会输出 "Upgrading sing-box (旧 -> 新)"
+		latest="$(apk upgrade --simulate --network=no sing-box 2>/dev/null | sed -n 's/.*Upgrading sing-box (.* -> \([^)]*\)).*/\1/p' | head -n 1)"
+		extra=",\"current\":\"$current\",\"latest\":\"$latest\""
+		;;
+	upgrade)
+		# 代理在运行时，装好新版后重启，让新版本生效
+		was_running=0
+		client_running && was_running=1
+		apk upgrade -U sing-box
+		rc=$?
+		now="$(installed)"
+		restarted=false
+		if [ "$rc" -eq 0 ] && [ "$now" != "$current" ] && [ "$was_running" = 1 ]; then
+			/etc/init.d/homeproxy restart
+			restarted=true
+		fi
+		extra=",\"from\":\"$current\",\"current\":\"$now\",\"restarted\":$restarted"
+		;;
+	*) rc=1 extra="" ;;
+esac
+
+if [ "$rc" -eq 0 ]; then
+	state done ",\"code\":0,\"finished\":$(date +%s)$extra"
+else
+	state failed ",\"code\":$rc,\"finished\":$(date +%s)$extra"
+fi

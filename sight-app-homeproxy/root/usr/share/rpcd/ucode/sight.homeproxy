@@ -7,8 +7,9 @@
 
 'use strict';
 
-import { access, error, lstat, popen, readfile, writefile } from 'fs';
+import { access, error, lsdir, lstat, mkdir, popen, readfile, rmdir, writefile } from 'fs';
 import * as socket from 'socket';
+import { connect } from 'ubus';
 import { cursor } from 'uci';
 import { STATUS, fail, shellquote } from 'sight.rpc';
 
@@ -23,6 +24,33 @@ const RUN_DIR = '/var/run/homeproxy';
 const UDP_TYPES = ['hysteria', 'hysteria2', 'tuic', 'wireguard'];
 const LATENCY_MAX_NODES = 128, LATENCY_TIMEOUT = 3000;
 const ECONNREFUSED = 111;
+
+/* sing-box 核心的检查与更新：apk 联网可能超过 rpcd 调用超时，交给后台任务，页面轮询 core_task */
+const CORE_DIR = '/tmp/sight-homeproxy';
+const CORE_TASK = CORE_DIR + '/core.json', CORE_LOG = CORE_DIR + '/core.log', CORE_LOCK = CORE_DIR + '/start.lock';
+const CORE_RUNNER = '/usr/libexec/sight-homeproxy-core';
+const CORE_OUTPUT_LIMIT = 8192;
+/* /proc/<pid>/stat 的时间单位；OpenWrt 内核均为 100 */
+const CLK_TCK = 100;
+
+function read_json(path) {
+	try { return json(readfile(path) || ''); } catch { return null; }
+}
+/* /proc/<pid>/stat 中进程名之后的字段：[0] 状态、[1] 父进程、[19] 启动时刻（开机后的时钟滴答数） */
+function stat_fields(pid) {
+	const stat = readfile(`/proc/${pid}/stat`);
+	const end = stat ? rindex(stat, ')') : -1;
+	return end < 0 ? null : split(trim(substr(stat, end + 1)), ' ');
+}
+/* 后台任务的状态；进程已不在（被杀、异常退出）却仍标着 running 时改记为失败 */
+function core_task_state() {
+	const t = read_json(CORE_TASK);
+	if (t?.state === 'running' && t.pid && !access(`/proc/${t.pid}`)) {
+		t.state = 'failed';
+		t.code = -1;
+	}
+	return t;
+}
 
 function monotonicMs() {
 	const c = clock(true);
@@ -149,6 +177,72 @@ const methods = {
 				fd.close();
 			}
 			return { lines };
+		}
+	},
+
+	/* sing-box 客户端进程的运行时长与内存。开启 ujail 时 procd 记录的是 ujail，sing-box 是它的子进程 */
+	client_status: {
+		call: function() {
+			const ubus = connect();
+			const inst = ubus?.call('service', 'list', { name: 'homeproxy' })?.homeproxy?.instances?.['sing-box-c'];
+			ubus?.disconnect();
+			if (!inst?.running || !inst.pid)
+				return { running: false };
+
+			let pid = inst.pid;
+			if (trim(readfile(`/proc/${pid}/comm`) || '') !== 'sing-box')
+				for (let p in lsdir('/proc') || [])
+					if (match(p, /^\d+$/) && stat_fields(p)?.[1] == `${pid}` && trim(readfile(`/proc/${p}/comm`) || '') === 'sing-box') {
+						pid = int(p);
+						break;
+					}
+
+			const start = stat_fields(pid)?.[19];
+			const boot = +split(readfile('/proc/uptime') || '', ' ')[0];
+			const rss = match(readfile(`/proc/${pid}/status`) || '', /VmRSS:\s+(\d+) kB/);
+			return {
+				running: true,
+				uptime: start ? max(0, int(boot - int(start) / CLK_TCK)) : null,
+				memory: rss ? int(rss[1]) * 1024 : null
+			};
+		}
+	},
+
+	/* 最近一次核心检查或更新的结果与输出；supported 为 false 表示设备不用 apk，页面不提供更新 */
+	core_task: {
+		call: function() {
+			const t = core_task_state();
+			let output = t ? (readfile(CORE_LOG) || '') : '';
+			if (length(output) > CORE_OUTPUT_LIMIT)
+				output = substr(output, length(output) - CORE_OUTPUT_LIMIT);
+			return { supported: !!access('/usr/bin/apk'), task: t, output };
+		}
+	},
+
+	/* 开始检查（check）或更新（upgrade）sing-box；已有任务在进行时不另起，返回进行中的任务 */
+	core_start: {
+		args: { action: 'action' },
+		call: function(req) {
+			const action = req.args?.action;
+			if (!(action in ['check', 'upgrade']))
+				return fail(req, STATUS.INVALID_ARGUMENT);
+			if (!access('/usr/bin/apk'))
+				return fail(req, STATUS.NOT_SUPPORTED);
+
+			mkdir(CORE_DIR);
+			if (!mkdir(CORE_LOCK))
+				return { task: core_task_state() };
+			const current = core_task_state();
+			if (current?.state === 'running') {
+				rmdir(CORE_LOCK);
+				return { task: current };
+			}
+			const t = { action, state: 'running', started: time() };
+			writefile(CORE_TASK, sprintf('%J', t));
+			writefile(CORE_LOG, '');
+			system(`${CORE_RUNNER} ${action} ${t.started} </dev/null >>${CORE_LOG} 2>&1 &`);
+			rmdir(CORE_LOCK);
+			return { task: t };
 		}
 	},
 

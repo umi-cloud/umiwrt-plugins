@@ -209,3 +209,16 @@ test('延迟分档与排序：快的在前，失败的其后，未测与不支�
 	assert.deepEqual(sortByLatency(nodes, latency).map(n => n.id), ['d', 'f', 'b', 'a', 'e', 'c', 'g']);
 	assert.deepEqual(nodes.map(n => n.id), ['a', 'b', 'c', 'd', 'e', 'f', 'g']);
 });
+
+test('核心更新状态：不支持、未检查、进行中、有新版、已是最新、已更新、失败', async () => {
+	const { coreUpdateState } = await import('../src/service.js');
+	assert.deepEqual(coreUpdateState({ supported: false, task: null }), { kind: 'unsupported' });
+	assert.deepEqual(coreUpdateState({ supported: true, task: null }), { kind: 'idle' });
+	assert.deepEqual(coreUpdateState({ supported: true, task: { action: 'check', state: 'running' } }), { kind: 'running', action: 'check' });
+	assert.deepEqual(coreUpdateState({ supported: true, task: { action: 'check', state: 'done', finished: 9, current: '1.12.25-r1', latest: '1.12.26-r1' } }), { kind: 'available', version: '1.12.26-r1', current: '1.12.25-r1', time: 9 });
+	assert.deepEqual(coreUpdateState({ supported: true, task: { action: 'check', state: 'done', finished: 9, current: '1.12.25-r1', latest: '' } }), { kind: 'latest', time: 9 });
+	assert.deepEqual(coreUpdateState({ supported: true, task: { action: 'upgrade', state: 'done', finished: 9, from: 'a', current: 'b', restarted: true } }), { kind: 'upgraded', version: 'b', from: 'a', restarted: true, time: 9 });
+	/* 更新时已是最新：版本没变 */
+	assert.equal(coreUpdateState({ supported: true, task: { action: 'upgrade', state: 'done', finished: 9, from: 'a', current: 'a' } }).kind, 'latest');
+	assert.deepEqual(coreUpdateState({ supported: true, task: { action: 'upgrade', state: 'failed', code: 1 }, output: 'ERROR: x' }), { kind: 'failed', action: 'upgrade', output: 'ERROR: x' });
+});

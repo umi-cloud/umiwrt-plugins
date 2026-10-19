@@ -5,7 +5,7 @@
  *   2. ACL：页面所需权限只来自本包的 sight-plugin-homeproxy 组，仅有 sight-ui 组的账号不可用
  *   3. 开关与主节点、延迟（TCP，UDP 节点改 ping）、导入分享链接与删除节点、手工添加/编辑节点（未管理选项保留）、分流/UDP/DNS、自定义域名、设备名单、
  *      订阅与规则库、按订阅归组与删除、订阅过滤、立即更新与按订阅的更新结果、自定义分流（模板、出站/规则/规则集/DNS 增删改、排序、启停与引用保护，
- *      生成的配置经 generate_client.uc + sing-box check 校验）、连通性检查、启动失败诊断、日志跟随与清空
+ *      生成的配置经 generate_client.uc + sing-box check 校验）、连通性检查、启动失败诊断、sing-box 核心（运行状态、功能支持、重启、检查更新）、日志跟随与清空
  * 会修改配置，结束时整份恢复 /etc/config/homeproxy。公共底座取自 sight-ui 工程：
  *   SIGHT_UI=/path/to/sight-ui LUCI_URL=http://127.0.0.1:8143 CONTAINER=<专用容器> node sight/scripts/flow-check.mjs
  */
@@ -19,14 +19,14 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const { check, section, sh, ubus, denied, contract, withAclUser, browser, finish } = await createFlow({ id: 'homeproxy', outDir: join(ROOT, '.visual-out/flow') });
 
 section('接口签名');
-contract('sight.homeproxy', { singbox_get_features: {}, connection_check: { site: 'String' }, resources_get_version: { type: 'String' }, resources_update: { type: 'String' }, log_clean: { type: 'String' }, acllist_read: { type: 'String' }, acllist_write: { type: 'String', content: 'String' }, node_latency: { nodes: 'Array' }, client_errors: {} });
+contract('sight.homeproxy', { singbox_get_features: {}, connection_check: { site: 'String' }, resources_get_version: { type: 'String' }, resources_update: { type: 'String' }, log_clean: { type: 'String' }, acllist_read: { type: 'String' }, acllist_write: { type: 'String', content: 'String' }, node_latency: { nodes: 'Array' }, client_errors: {}, client_status: {}, core_task: {}, core_start: { action: 'String' } });
 
 section('ACL：权限来自本包');
 await withAclUser(['sight-ui'], async sid => {
 	check(denied(await ubus(sid, 'sight.homeproxy', 'singbox_get_features')) && denied(await ubus(sid, 'uci', 'get', { config: 'homeproxy' })), '只有 sight-ui 组的账号不能访问 HomeProxy');
 });
 await withAclUser(['sight-ui', 'sight-plugin-homeproxy'], async sid => {
-	for (const [o, m, p] of [['sight.homeproxy', 'singbox_get_features', {}], ['sight.homeproxy', 'acllist_read', { type: 'proxy_list' }], ['sight.homeproxy', 'node_latency', { nodes: [] }], ['sight.homeproxy', 'client_errors', {}], ['uci', 'get', { config: 'homeproxy' }]])
+	for (const [o, m, p] of [['sight.homeproxy', 'singbox_get_features', {}], ['sight.homeproxy', 'acllist_read', { type: 'proxy_list' }], ['sight.homeproxy', 'node_latency', { nodes: [] }], ['sight.homeproxy', 'client_errors', {}], ['sight.homeproxy', 'client_status', {}], ['sight.homeproxy', 'core_task', {}], ['uci', 'get', { config: 'homeproxy' }]])
 		check((await ubus(sid, o, m, p))?.[0] === 0, `加上本包权限组后可调用 ${o}.${m}`);
 	const ping = params => ubus(sid, 'file', 'exec', { command: '/bin/ping', params });
 	check((await ping(['-4', '-c', '3', '-W', '1', '127.0.0.1']))?.[0] === 0 && denied(await ping(['-4', '-c', '300', '-W', '1', '127.0.0.1'])), '延迟测试只放行固定参数的 ping');
@@ -61,7 +61,7 @@ const bySection = (type, label) => sh(`uci -X show homeproxy | grep -E "^homepro
 try {
 	await browser(async ({ page, waitFor, fill, clickText, go, apply, confirmDialog, screenshot }) => {
 		section('HomeProxy');
-		const hpTab = async tab => { await go(`#/homeproxy?tab=${tab}`, `!!document.querySelector('[data-homeproxy]') && document.querySelector('.workspace-tabs [aria-selected=true]')?.id.endsWith('-tab-${['nodes', 'routing', 'devices', 'subscriptions', 'logs'].indexOf(tab)}')`); };
+		const hpTab = async tab => { await go(`#/homeproxy?tab=${tab}`, `!!document.querySelector('[data-homeproxy]') && document.querySelector('.workspace-tabs [aria-selected=true]')?.id.endsWith('-tab-${['nodes', 'routing', 'devices', 'subscriptions', 'core', 'logs'].indexOf(tab)}')`); };
 		/* 在容器里直接改过配置后重载页面，让页面读到新配置 */
 		const reloadPage = async tab => { await page.evaluate(`location.reload()`); await new Promise(r => setTimeout(r, 1500)); await waitFor(`!!document.querySelector('[data-homeproxy]')`, '重载页面'); await hpTab(tab); };
 		await go('#/homeproxy', `!!document.querySelector('[data-homeproxy]')`);
@@ -80,7 +80,7 @@ try {
 		await waitFor(`document.querySelector('[data-hp-sort]')?.value === 'latency'`, '按延迟排序');
 		check(await page.evaluate(`document.querySelector('[data-node="sighttest"] [data-latency]').dataset.tone === 'failed'`), '测完自动按延迟排序，失败结果标为红色');
 		/* 不带 tab 的地址（侧栏入口）回到节点分区 */
-		await go('#/homeproxy?tab=logs', `document.querySelector('.workspace-tabs [aria-selected=true]')?.id.endsWith('-tab-4')`);
+		await go('#/homeproxy?tab=logs', `document.querySelector('.workspace-tabs [aria-selected=true]')?.id.endsWith('-tab-5')`);
 		await go('#/homeproxy', `document.querySelector('.workspace-tabs [aria-selected=true]')?.id.endsWith('-tab-0')`);
 		check(true, '从其它分区回到 HomeProxy 入口时显示节点分区');
 
@@ -423,6 +423,23 @@ try {
 		await reloadPage('logs');
 		check(await page.evaluate(`!document.querySelector('[data-hp-diagnosis]')`), '恢复后不再显示启动失败原因');
 
+		/* sing-box 核心：代理开着时显示运行时长与内存；功能支持；重启；检查更新（结果取决于容器网络与软件源） */
+		await hpTab('core');
+		await waitFor(`document.querySelector('[data-hp-core]')?.dataset.hpCore === 'running' && /\\d+ MB/.test(document.querySelector('[data-hp-core]').textContent)`, '核心运行状态', 20000);
+		check(await page.evaluate(`document.querySelector('[data-hp-core]').textContent.includes('1.') && /Running for\\s*\\d+ (min|h|d)/.test(document.querySelector('[data-hp-core]').textContent)`), '核心分区显示版本、运行时长与内存（jail 下取 sing-box 子进程）');
+		check(await page.evaluate(`document.querySelectorAll('[data-feature]').length === 5 && document.querySelector('[data-feature="with_quic"]').dataset.ok === 'yes'`), '列出编译特性与内核能力');
+		const pidBefore = sh(`ubus call service list '{"name":"homeproxy"}' | jsonfilter -e '@.homeproxy.instances["sing-box-c"].pid'`).trim();
+		await clickText('[data-hp-core] button', 'Restart');
+		await confirmDialog('Restart');
+		await waitFor(`/HomeProxy restarted/.test(document.querySelector('main').textContent)`, '重启', 30000);
+		const pidAfter = sh(`ubus call service list '{"name":"homeproxy"}' | jsonfilter -e '@.homeproxy.instances["sing-box-c"].pid'`).trim();
+		check(!!pidAfter && pidAfter !== pidBefore, '重启服务后 sing-box 换了新进程', `${pidBefore} → ${pidAfter}`);
+		await waitFor(`!!document.querySelector('[data-hp-core-update]')`, '更新状态');
+		await clickText('[data-hp-core-update] button', 'Check for updates');
+		await waitFor(`['latest', 'available', 'failed'].includes(document.querySelector('[data-hp-core-update]')?.dataset.hpCoreUpdate)`, '检查更新', 120000);
+		check(true, `检查更新给出结果：${await page.evaluate(`document.querySelector('[data-hp-core-update]').textContent.trim()`)}`);
+		await screenshot('homeproxy-core');
+
 		await hpTab('logs');
 		await waitFor(`!!document.querySelector('[role=tabpanel]:not([hidden]) [role=tabpanel]:not([hidden]) :is(pre, .feedback:not([data-tone=loading]))')`, '日志');
 		await page.evaluate(`document.querySelector('[role=switch][aria-label="Follow"]').click()`);
@@ -444,7 +461,7 @@ try {
 		check(sh('uci get homeproxy.config.main_node').trim() === 'nil', '关闭代理写回 nil');
 	});
 } finally {
-	sh(`cp ${BACKUP} /etc/config/homeproxy; rm -f ${BACKUP} /www/sight-flow-sub.txt /etc/homeproxy/subscription_status.json`);
+	sh(`cp ${BACKUP} /etc/config/homeproxy; rm -f ${BACKUP} /www/sight-flow-sub.txt /etc/homeproxy/subscription_status.json; rm -rf /tmp/sight-homeproxy`);
 	sh(`uci set homeproxy.config.main_node=nil; uci set homeproxy.config.routing_mode=${hpMode}; uci set homeproxy.config.main_udp_node=same; uci set homeproxy.config.dns_server=8.8.8.8;
 		uci -q delete homeproxy.subscription.subscription_url; uci set homeproxy.subscription.update_via_proxy=0; uci set homeproxy.control.lan_proxy_mode=disabled; uci -q delete homeproxy.control.lan_proxy_mac_addrs;
 		for s in $(uci -X show homeproxy | grep -E "label='Sight (Tokyo|HK)'" | cut -d. -f2); do uci delete homeproxy.$s; done; uci commit homeproxy; /etc/init.d/homeproxy stop 2>/dev/null; true`);

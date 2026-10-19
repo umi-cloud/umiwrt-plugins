@@ -1,12 +1,14 @@
 {
 	"sight-plugin-homeproxy": {
-		"description": "Sight HomeProxy page: status and diagnosis, nodes and latency, routing, domain lists, subscriptions, resources and logs",
+		"description": "Sight HomeProxy page: status and diagnosis, nodes and latency, routing, domain lists, subscriptions, resources, sing-box core and logs",
 		"read": {
 			"ubus": {
 				"sight.homeproxy": [
 					"acllist_read",
 					"client_errors",
+					"client_status",
 					"connection_check",
+					"core_task",
 					"node_latency",
 					"resources_get_version",
 					"singbox_get_features"
@@ -34,6 +36,7 @@
 			"ubus": {
 				"sight.homeproxy": [
 					"acllist_write",
+					"core_start",
 					"log_clean",
 					"resources_update"
 				]

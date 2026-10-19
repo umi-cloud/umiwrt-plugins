@@ -1,7 +1,8 @@
 /*
  * HomeProxy（sing-box 客户端）的 Sight 页面取数服务。按日常任务管理：代理开关与主节点、节点添加/编辑（node.js）、
  * 分享链接导入与删除、分流模式、UDP 节点与 DNS、自定义分流（routing.js）、哪些局域网设备走代理、
- * 订阅（来源归组、过滤、更新结果，subscription.js）与规则库更新、连通性检查、启动失败诊断、日志。服务端不在页面范围内。
+ * 订阅（来源归组、过滤、更新结果，subscription.js）与规则库更新、连通性检查、启动失败诊断、sing-box 核心（运行状态、
+ * 编译特性、重启、经 apk 检查与更新）、日志。服务端不在页面范围内。
  * 配置写入会话暂存（页面保存后立即带回滚应用）；订阅/规则库更新、连通性检查、清空日志为即时操作。
  * 关闭代理即 main_node = 'nil'（后端约定的「禁用」）；自定义分流模式下主节点不生效，开关对应 routing.default_outbound。
  * 设备访问控制只管按 MAC 的名单（lan_proxy_mac_addrs / lan_direct_mac_addrs），按 IP 的名单原样保留。
@@ -91,6 +92,24 @@ export function diagnose(serviceLog, fatalLines = []) {
 	const since = started >= 0 ? logTime(lines[started]) : '';
 	const fatal = fatalLines.filter(l => / sing-box\[\d+\]: /.test(l) && /FATAL/.test(l) && logTime(l) >= since).at(-1);
 	return fatal ? { reason: 'exited', detail: errorText(fatal), log: 'syslog' } : null;
+}
+
+/* sing-box 的编译特性与设备的内核能力（singbox_get_features）：缺少时相应的节点或功能用不了 */
+export const CORE_FEATURES = ['with_quic', 'with_utls', 'with_wireguard', 'hp_has_tproxy', 'hp_has_tun'];
+/**
+ * 纯函数：core_task 的返回 → 更新区的状态。
+ * kind：unsupported 设备不用 apk；idle 还没检查过；running 检查或更新进行中；available 有新版 version；
+ * latest 已是最新；upgraded 已从 from 更新到 version（restarted 表示随后重启了 HomeProxy）；failed 失败，output 为 apk 输出
+ */
+export function coreUpdateState(r) {
+	if (!r?.supported) return { kind: 'unsupported' };
+	const task = r.task;
+	if (!task) return { kind: 'idle' };
+	if (task.state === 'running') return { kind: 'running', action: task.action };
+	if (task.state !== 'done') return { kind: 'failed', action: task.action, output: r.output || '' };
+	if (task.action === 'upgrade')
+		return task.current && task.current !== task.from ? { kind: 'upgraded', version: task.current, from: task.from, restarted: !!task.restarted, time: task.finished } : { kind: 'latest', time: task.finished };
+	return task.latest ? { kind: 'available', version: task.latest, current: task.current, time: task.finished } : { kind: 'latest', time: task.finished };
 }
 
 export const ACCESS = ['disabled', 'listed_only', 'except_listed'];
@@ -405,6 +424,20 @@ export function createHomeProxy(client, uci) {
 		async diagnosis() {
 			const [service, errors] = await Promise.all([this.log('homeproxy'), client.call('sight.homeproxy', 'client_errors')]);
 			return diagnose(service, errors?.lines || []);
+		},
+		/** @returns {Promise<{ running: boolean, uptime?: number | null, memory?: number | null }>} sing-box 客户端的运行时长（秒）与内存（字节） */
+		async clientStatus() { return await client.call('sight.homeproxy', 'client_status') || { running: false }; },
+		/** @returns {Promise<ReturnType<typeof coreUpdateState>>} */
+		async coreUpdate() { return coreUpdateState(await client.call('sight.homeproxy', 'core_task')); },
+		/** 开始检查（check）或更新（upgrade）；后台进行，之后用 coreUpdate 轮询 */
+		async coreStart(action) {
+			if (!['check', 'upgrade'].includes(action)) throw new Error('Unknown action');
+			await client.call('sight.homeproxy', 'core_start', { action });
+		},
+		/** 重启 HomeProxy（即时操作，代理中断几秒） */
+		async restart() {
+			const r = await initAction(client, 'homeproxy', 'restart');
+			if (r?.result === false) throw new Error('Restart failed');
 		},
 		async cleanLog(name) {
 			if (!LOGS.includes(name)) throw new Error('Unknown log');
