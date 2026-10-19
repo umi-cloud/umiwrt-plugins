@@ -3,9 +3,9 @@
  * HomeProxy 的 Sight 页面真实流程验收，需在装有 HomeProxy 后端、sight-ui 与本插件页的专用容器运行。
  *   1. rpcd 接口签名逐字比对（后端升级后如有变化需复核 src/service.js）
  *   2. ACL：页面所需权限只来自本包的 sight-plugin-homeproxy 组，仅有 sight-ui 组的账号不可用
- *   3. 开关与主节点、延迟、导入分享链接与删除节点、手工添加/编辑节点（未管理选项保留）、分流/UDP/DNS、自定义域名、设备名单、
- *      订阅与规则库、按订阅归组与删除、订阅过滤、自定义分流（模板、出站/规则/规则集/DNS 增删改、排序、启停与引用保护，
- *      生成的配置经 generate_client.uc + sing-box check 校验）、连通性检查、日志与清空
+ *   3. 开关与主节点、延迟（TCP，UDP 节点改 ping）、导入分享链接与删除节点、手工添加/编辑节点（未管理选项保留）、分流/UDP/DNS、自定义域名、设备名单、
+ *      订阅与规则库、按订阅归组与删除、订阅过滤、立即更新与按订阅的更新结果、自定义分流（模板、出站/规则/规则集/DNS 增删改、排序、启停与引用保护，
+ *      生成的配置经 generate_client.uc + sing-box check 校验）、连通性检查、启动失败诊断、日志跟随与清空
  * 会修改配置，结束时整份恢复 /etc/config/homeproxy。公共底座取自 sight-ui 工程：
  *   SIGHT_UI=/path/to/sight-ui LUCI_URL=http://127.0.0.1:8143 CONTAINER=<专用容器> node sight/scripts/flow-check.mjs
  */
@@ -19,14 +19,14 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const { check, section, sh, ubus, denied, contract, withAclUser, browser, finish } = await createFlow({ id: 'homeproxy', outDir: join(ROOT, '.visual-out/flow') });
 
 section('接口签名');
-contract('sight.homeproxy', { singbox_get_features: {}, connection_check: { site: 'String' }, resources_get_version: { type: 'String' }, resources_update: { type: 'String' }, log_clean: { type: 'String' }, acllist_read: { type: 'String' }, acllist_write: { type: 'String', content: 'String' } });
+contract('sight.homeproxy', { singbox_get_features: {}, connection_check: { site: 'String' }, resources_get_version: { type: 'String' }, resources_update: { type: 'String' }, log_clean: { type: 'String' }, acllist_read: { type: 'String' }, acllist_write: { type: 'String', content: 'String' }, node_latency: { nodes: 'Array' }, client_errors: {} });
 
 section('ACL：权限来自本包');
 await withAclUser(['sight-ui'], async sid => {
 	check(denied(await ubus(sid, 'sight.homeproxy', 'singbox_get_features')) && denied(await ubus(sid, 'uci', 'get', { config: 'homeproxy' })), '只有 sight-ui 组的账号不能访问 HomeProxy');
 });
 await withAclUser(['sight-ui', 'sight-plugin-homeproxy'], async sid => {
-	for (const [o, m, p] of [['sight.homeproxy', 'singbox_get_features', {}], ['sight.homeproxy', 'acllist_read', { type: 'proxy_list' }], ['uci', 'get', { config: 'homeproxy' }]])
+	for (const [o, m, p] of [['sight.homeproxy', 'singbox_get_features', {}], ['sight.homeproxy', 'acllist_read', { type: 'proxy_list' }], ['sight.homeproxy', 'node_latency', { nodes: [] }], ['sight.homeproxy', 'client_errors', {}], ['uci', 'get', { config: 'homeproxy' }]])
 		check((await ubus(sid, o, m, p))?.[0] === 0, `加上本包权限组后可调用 ${o}.${m}`);
 	const ping = params => ubus(sid, 'file', 'exec', { command: '/bin/ping', params });
 	check((await ping(['-4', '-c', '3', '-W', '1', '127.0.0.1']))?.[0] === 0 && denied(await ping(['-4', '-c', '300', '-W', '1', '127.0.0.1'])), '延迟测试只放行固定参数的 ping');
@@ -39,6 +39,17 @@ await withAclUser(['sight-ui', 'sight-plugin-homeproxy'], async sid => {
 const hpMode = sh('uci -q get homeproxy.config.routing_mode || echo bypass_mainland_china').trim();
 sh(`uci set homeproxy.sighttest=node; uci set homeproxy.sighttest.label='Sight test node'; uci set homeproxy.sighttest.type=socks; uci set homeproxy.sighttest.address=127.0.0.1; uci set homeproxy.sighttest.port=1080;
 	uci set homeproxy.config.main_node=nil; uci -q delete homeproxy.subscription.subscription_url; uci commit homeproxy`);
+/* 延迟接口：本机 1080 无人监听为拒绝连接；只走 UDP 的协议交给页面 ping；超过 128 个拒绝 */
+section('延迟接口');
+{
+	sh(`uci set homeproxy.sightudp=node; uci set homeproxy.sightudp.type=hysteria2; uci set homeproxy.sightudp.address=127.0.0.1; uci set homeproxy.sightudp.port=443; uci commit homeproxy`);
+	const r = JSON.parse(sh(`ubus call sight.homeproxy node_latency '{"nodes":["sighttest","sightudp","sightmissing"]}'`)).results;
+	sh('uci delete homeproxy.sightudp; uci commit homeproxy');
+	check(r.sighttest === 'refused' && r.sightudp === 'udp' && r.sightmissing === 'error', 'TCP 测延迟：拒绝连接、UDP 协议、节点不存在分别标出', JSON.stringify(r));
+	const many = JSON.stringify({ nodes: Array.from({ length: 129 }, (_, i) => `n${i}`) });
+	check(/Invalid argument/.test(sh(`ubus call sight.homeproxy node_latency '${many}' 2>&1 || true`)), '一次超过 128 个节点被拒绝');
+}
+
 /* 结束时整份恢复：自定义分流、过滤等改动较多，逐项还原容易漏 */
 const BACKUP = '/tmp/sight-homeproxy-flow.bak';
 sh(`cp /etc/config/homeproxy ${BACKUP}`);
@@ -62,10 +73,16 @@ try {
 		await waitFor(`/Main node/.test(document.querySelector('[data-node="sighttest"]')?.textContent || '')`, '节点标记为主节点');
 		check(await page.evaluate(`![...document.querySelectorAll('[data-node="sighttest"] button')].some(b => b.textContent.trim() === 'Delete')`), '使用中的节点不提供删除');
 
-		/* 延迟：路由器 ping 节点服务器（测试节点地址为 127.0.0.1，必然有响应） */
+		/* 延迟：路由器连接节点服务器端口（测试节点为 127.0.0.1:1080，无人监听，必然被拒绝；ping 会显示毫秒数，借此确认走的是 TCP） */
 		await clickText('.toolbar button', 'Test latency');
-		await waitFor(`document.querySelector('[data-node="sighttest"] [data-latency]')?.dataset.latency === 'ok'`, '延迟结果', 20000);
-		check(await page.evaluate(`/^\\d+ ms$/.test(document.querySelector('[data-node="sighttest"] [data-latency]').textContent.trim())`), '测试延迟后在节点行显示毫秒数');
+		await waitFor(`document.querySelector('[data-node="sighttest"] [data-latency]')?.dataset.latency === 'refused'`, '延迟结果', 20000);
+		check(await page.evaluate(`document.querySelector('[data-node="sighttest"] [data-latency]').textContent.trim() === 'Refused'`), '测试延迟按 TCP 连接节点端口，端口未开放时显示拒绝连接');
+		await waitFor(`document.querySelector('[data-hp-sort]')?.value === 'latency'`, '按延迟排序');
+		check(await page.evaluate(`document.querySelector('[data-node="sighttest"] [data-latency]').dataset.tone === 'failed'`), '测完自动按延迟排序，失败结果标为红色');
+		/* 不带 tab 的地址（侧栏入口）回到节点分区 */
+		await go('#/homeproxy?tab=logs', `document.querySelector('.workspace-tabs [aria-selected=true]')?.id.endsWith('-tab-4')`);
+		await go('#/homeproxy', `document.querySelector('.workspace-tabs [aria-selected=true]')?.id.endsWith('-tab-0')`);
+		check(true, '从其它分区回到 HomeProxy 入口时显示节点分区');
 
 		/* 导入分享链接：预览识别结果，只导入有效链接 */
 		await clickText('.toolbar button', 'Import links');
@@ -237,6 +254,25 @@ try {
 		await apply('订阅过滤');
 		check(uget('subscription.filter_nodes') === 'whitelist' && uget('subscription.filter_keywords') === '^Sight' && uget('subscription.user_agent') === 'SightTest/1.0', '订阅过滤方式、关键字与 User-Agent 写入', sh('uci show homeproxy.subscription'));
 
+		/* 立即更新：本机 uhttpd 提供一份订阅（2 个可用节点、1 个不支持的），另一份地址不存在；按订阅给出结果。前后整份恢复配置 */
+		{
+			const feed = Buffer.from(['ss://YWVzLTI1Ni1nY206cGFzcw@192.0.2.10:8388#Sight%20Feed%20A', 'ss://YWVzLTI1Ni1nY206cGFzcw@192.0.2.11:8388#Sight%20Feed%20B', 'vless://x@192.0.2.12:443?type=kcp#Sight%20Feed%20K'].join('\n')).toString('base64');
+			const good = 'http://127.0.0.1/sight-flow-sub.txt', missing = 'http://127.0.0.1/sight-flow-missing.txt';
+			const md5 = u => sh(`printf %s '${u}' | md5sum | cut -d' ' -f1`).trim();
+			sh(`cp /etc/config/homeproxy /tmp/sight-homeproxy-sub.bak; printf %s '${feed}' > /www/sight-flow-sub.txt; rm -f /etc/homeproxy/subscription_status.json;
+				uci -q delete homeproxy.subscription.subscription_url; uci add_list homeproxy.subscription.subscription_url='${good}#Local feed'; uci add_list homeproxy.subscription.subscription_url='${missing}#Missing feed'; uci commit homeproxy`);
+			await reloadPage('subscriptions');
+			check(await page.evaluate(`/Not updated yet/.test(document.querySelector('[data-hp-group="${md5(good)}"]')?.textContent || '') && !document.querySelector('[data-hp-sub-status]')`), '还没更新过时显示尚未更新');
+			await clickText('form[aria-label="Subscriptions"] button', 'Update now');
+			await waitFor(`/Nothing usable was fetched from Missing feed/.test(document.querySelector('main').textContent)`, '订阅更新结果', 60000);
+			check(await page.evaluate(`/Subscriptions updated: 2 nodes added/.test(document.querySelector('main').textContent)`), '立即更新后按状态文件说明新增节点数，并点名没取到节点的订阅');
+			await waitFor(`/Fetched 2 nodes\\s*· 1 skipped/.test(document.querySelector('[data-hp-group="${md5(good)}"]')?.textContent || '') && /Download failed/.test(document.querySelector('[data-hp-group="${md5(missing)}"]')?.textContent || '')`, '按订阅的更新结果');
+			check(await page.evaluate(`/Last updated .*: 2 nodes added/.test(document.querySelector('[data-hp-sub-status="ok"]')?.textContent || '')`), '按订阅显示取到的节点数与下载失败，订阅卡显示上次更新时间');
+			await screenshot('homeproxy-subscription-status');
+			sh(`cp /tmp/sight-homeproxy-sub.bak /etc/config/homeproxy; rm -f /tmp/sight-homeproxy-sub.bak /www/sight-flow-sub.txt`);
+			await reloadPage('subscriptions');
+		}
+
 		/* 自定义分流：从「全部走代理」切过去，按「国内直连」模板建立初始配置 */
 		await hpTab('routing');
 		await fill({ 'hp-mode': 'custom' });
@@ -374,8 +410,26 @@ try {
 		await clickText('[data-check="google"] button', 'Google');
 		await waitFor(`!!document.querySelector('[data-check="google"] .badge')`, '连通性结果', 30000);
 		check(true, '连通性检查返回结果（容器无真实代理，只验证调用与呈现）');
+		/* 启动失败诊断：未知加密方式让 sing-box check 拒绝生成的配置，状态卡下给出原因并可直达日志 */
+		sh(`uci set homeproxy.sighttest.type=shadowsocks; uci set homeproxy.sighttest.shadowsocks_encrypt_method=sight-bogus; uci set homeproxy.sighttest.password=x; uci commit homeproxy; /etc/init.d/homeproxy restart >/dev/null 2>&1; true`);
+		await reloadPage('nodes');
+		await waitFor(`document.querySelector('[data-hp-diagnosis]')?.dataset.hpDiagnosis === 'check'`, '启动失败原因', 20000);
+		check(await page.evaluate(`/rejected the generated configuration \\(initialize outbound\\[\\d+\\]: unknown method: sight-bogus\\)/.test(document.querySelector('[data-hp-diagnosis]').textContent)`), '代理开着但配置检查失败时，状态卡下摘出 sing-box 的报错');
+		await screenshot('homeproxy-diagnosis');
+		await clickText('[data-hp-diagnosis] button', 'View log');
+		await waitFor(`/wrong client configuration detected/.test(document.querySelector('pre.log')?.textContent || '')`, '诊断直达日志');
+		check(true, '「查看日志」切到日志分区的服务日志');
+		sh(`uci set homeproxy.sighttest.type=socks; uci -q delete homeproxy.sighttest.shadowsocks_encrypt_method; uci -q delete homeproxy.sighttest.password; uci commit homeproxy; /etc/init.d/homeproxy restart >/dev/null 2>&1; true`);
+		await reloadPage('logs');
+		check(await page.evaluate(`!document.querySelector('[data-hp-diagnosis]')`), '恢复后不再显示启动失败原因');
+
 		await hpTab('logs');
 		await waitFor(`!!document.querySelector('[role=tabpanel]:not([hidden]) [role=tabpanel]:not([hidden]) :is(pre, .feedback:not([data-tone=loading]))')`, '日志');
+		await page.evaluate(`document.querySelector('[role=switch][aria-label="Follow"]').click()`);
+		sh('echo sight-follow-line >> /var/run/homeproxy/homeproxy.log');
+		await waitFor(`/sight-follow-line/.test(document.querySelector('pre.log')?.textContent || '')`, '日志跟随', 15000);
+		check(true, '打开跟随后日志自动刷新');
+		await page.evaluate(`document.querySelector('[role=switch][aria-label="Follow"]').click()`);
 		sh('echo sight-log-line >> /var/run/homeproxy/homeproxy.log');
 		await clickText('.log-actions button', 'Refresh');
 		await waitFor(`/sight-log-line/.test(document.querySelector('pre.log')?.textContent || '')`, '日志刷新');
@@ -390,7 +444,7 @@ try {
 		check(sh('uci get homeproxy.config.main_node').trim() === 'nil', '关闭代理写回 nil');
 	});
 } finally {
-	sh(`cp ${BACKUP} /etc/config/homeproxy; rm -f ${BACKUP}`);
+	sh(`cp ${BACKUP} /etc/config/homeproxy; rm -f ${BACKUP} /www/sight-flow-sub.txt /etc/homeproxy/subscription_status.json`);
 	sh(`uci set homeproxy.config.main_node=nil; uci set homeproxy.config.routing_mode=${hpMode}; uci set homeproxy.config.main_udp_node=same; uci set homeproxy.config.dns_server=8.8.8.8;
 		uci -q delete homeproxy.subscription.subscription_url; uci set homeproxy.subscription.update_via_proxy=0; uci set homeproxy.control.lan_proxy_mode=disabled; uci -q delete homeproxy.control.lan_proxy_mac_addrs;
 		for s in $(uci -X show homeproxy | grep -E "label='Sight (Tokyo|HK)'" | cut -d. -f2); do uci delete homeproxy.$s; done; uci commit homeproxy; /etc/init.d/homeproxy stop 2>/dev/null; true`);

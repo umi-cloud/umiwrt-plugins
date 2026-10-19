@@ -8,7 +8,9 @@
 'use strict';
 
 import { access, error, lstat, popen, readfile, writefile } from 'fs';
-import { shellquote } from 'sight.rpc';
+import * as socket from 'socket';
+import { cursor } from 'uci';
+import { STATUS, fail, shellquote } from 'sight.rpc';
 
 function hasKernelModule(kmod) {
 	return (system(sprintf('[ -e "/lib/modules/$(uname -r)"/%s ]', shellquote(kmod))) === 0);
@@ -16,6 +18,16 @@ function hasKernelModule(kmod) {
 
 const HP_DIR = '/etc/homeproxy';
 const RUN_DIR = '/var/run/homeproxy';
+
+/* 节点延迟：只走 UDP 的协议连 TCP 端口没有意义，交给页面另行处理 */
+const UDP_TYPES = ['hysteria', 'hysteria2', 'tuic', 'wireguard'];
+const LATENCY_MAX_NODES = 128, LATENCY_TIMEOUT = 3000;
+const ECONNREFUSED = 111;
+
+function monotonicMs() {
+	const c = clock(true);
+	return c[0] * 1000 + c[1] / 1000000;
+}
 
 const methods = {
 	acllist_read: {
@@ -117,6 +129,29 @@ const methods = {
 		}
 	},
 
+	/*
+	 * sing-box 运行期的致命错误（启动后退出）由 procd 记进系统日志，不在 sing-box-c.log 里：
+	 * 取系统日志中最近几条 sing-box 的 FATAL 与 procd 的崩溃循环记录，原样返回，由页面判断时间先后
+	 */
+	client_errors: {
+		call: function() {
+			const lines = [];
+			const fd = popen("logread -e 'sing-box' 2>/dev/null");
+			if (fd) {
+				for (let line = fd.read('line'); length(line); line = fd.read('line')) {
+					line = rtrim(line, '\n');
+					if ((match(line, / sing-box\[\d+\]: /) && index(line, 'FATAL') !== -1) || index(line, 'homeproxy::sing-box-c') !== -1) {
+						push(lines, line);
+						if (length(lines) > 5)
+							shift(lines);
+					}
+				}
+				fd.close();
+			}
+			return { lines };
+		}
+	},
+
 	connection_check: {
 		args: { site: 'site' },
 		call: function(req) {
@@ -147,6 +182,83 @@ const methods = {
 			if (filestat)
 				writefile(`${RUN_DIR}/${req.args?.type}.log`, '');
 			return { result: true };
+		}
+	},
+
+	/*
+	 * 路由器到各节点服务器端口的 TCP 握手耗时（不经代理）：先逐个解析地址，再一起非阻塞 connect，
+	 * 最多等 LATENCY_TIMEOUT。结果为毫秒，或 'timeout' / 'refused' / 'unresolved' / 'udp' / 'error'
+	 */
+	node_latency: {
+		args: { nodes: [] },
+		call: function(req) {
+			const ids = req.args?.nodes;
+			if (type(ids) !== 'array' || length(ids) > LATENCY_MAX_NODES)
+				return fail(req, STATUS.INVALID_ARGUMENT);
+
+			const uci = cursor();
+			const results = {}, targets = [];
+			for (let id in ids) {
+				if (type(id) !== 'string' || id in results)
+					continue;
+				const node = uci.get_all('homeproxy', id);
+				if (node?.['.type'] !== 'node') {
+					results[id] = 'error';
+					continue;
+				}
+				const port = int(node.port);
+				if (node.type in UDP_TYPES || node.transport === 'quic')
+					results[id] = 'udp';
+				else if (!node.address || !(port >= 1 && port <= 65535))
+					results[id] = 'error';
+				else {
+					const ai = socket.addrinfo(replace(node.address, /^\[|\]$/g, ''), `${port}`, { socktype: socket.SOCK_STREAM });
+					if (ai?.[0])
+						push(targets, { id, ai: ai[0] });
+					else
+						results[id] = 'unresolved';
+				}
+			}
+
+			const pending = [];
+			for (let t in targets) {
+				const sock = socket.create(t.ai.family, socket.SOCK_STREAM | socket.SOCK_NONBLOCK);
+				const start = monotonicMs();
+				if (!sock)
+					results[t.id] = 'error';
+				else if (sock.connect(t.ai.addr) || socket.error(true) === 115 /* EINPROGRESS */)
+					push(pending, { id: t.id, sock, start });
+				else {
+					results[t.id] = 'error';
+					sock.close();
+				}
+			}
+
+			const deadline = monotonicMs() + LATENCY_TIMEOUT;
+			while (length(pending) && monotonicMs() < deadline) {
+				const ready = socket.poll(max(1, int(deadline - monotonicMs())), ...map(pending, p => [p.sock, socket.POLLOUT]));
+				const now = monotonicMs();
+				for (let r in ready) {
+					if (!(r[1] & (socket.POLLOUT | socket.POLLERR | socket.POLLHUP)))
+						continue;
+					for (let p in pending)
+						if (p.sock === r[0] && !p.done) {
+							const err = p.sock.getopt(socket.SOL_SOCKET, socket.SO_ERROR);
+							results[p.id] = err ? (err === ECONNREFUSED ? 'refused' : 'error') : max(1, int(now - p.start + 0.5));
+							p.sock.close();
+							p.done = true;
+						}
+				}
+				for (let i = length(pending) - 1; i >= 0; i--)
+					if (pending[i].done)
+						splice(pending, i, 1);
+			}
+			for (let p in pending) {
+				results[p.id] = 'timeout';
+				p.sock.close();
+			}
+
+			return { results };
 		}
 	},
 

@@ -1,0 +1,15 @@
+#!/bin/sh
+# 暂停广告过滤：停止 adblock-fast，等到 until 里的时刻后在仍开启时重新启动。
+# until 由 sight.adblock-fast 写入，期间可被改写（延长暂停）或删除（取消暂停：直接退出，不启动服务）。
+
+DIR=/var/run/sight-adblock-fast
+echo $$ > "$DIR/pid"
+/etc/init.d/adblock-fast stop >/dev/null 2>&1
+while :; do
+	end=$(cat "$DIR/until" 2>/dev/null) || exit 0
+	[ "$(date +%s)" -lt "${end:-0}" ] || break
+	sleep 2
+done
+rm -f "$DIR/until" "$DIR/pid"
+[ "$(uci -q get adblock-fast.config.enabled)" = 1 ] && exec /etc/init.d/adblock-fast start >/dev/null 2>&1
+exit 0

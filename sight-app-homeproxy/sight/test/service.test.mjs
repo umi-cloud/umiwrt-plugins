@@ -112,15 +112,56 @@ test('域名列表：解析去重；只写有变化的列表，代理开着才�
 	await assert.rejects(svc.saveDomainLists({ proxy_list: ['-bad'], direct_list: [] }, cur, false), /Invalid domain/);
 });
 
-test('延迟：解析 ping 平均值；全丢包为超时；IPv6 地址不支持', async () => {
+test('延迟：TCP 按节点段名成批测；UDP 节点的 ping 解析平均值，全丢包为超时，IPv6 地址不支持', async () => {
 	const { parsePing } = await import('../src/service.js');
 	assert.equal(parsePing('3 packets transmitted, 3 packets received\nround-trip min/avg/max = 20.1/23.6/30.2 ms'), 24);
 	assert.equal(parsePing('rtt min/avg/max/mdev = 0.036/0.042/0.048/0.005 ms'), 1);
 	assert.equal(parsePing('3 packets transmitted, 0 packets received, 100% packet loss'), null);
-	const svc = createHomeProxy({ call: async (o, m, p) => ({ stdout: p.params.at(-1) === '192.0.2.1' ? '100% packet loss' : 'round-trip min/avg/max = 5.0/6.4/8.0 ms' }) }, {});
-	assert.equal(await svc.latency({ address: 'node.example' }), 6);
-	assert.equal(await svc.latency({ address: '192.0.2.1' }), 'timeout');
-	assert.equal(await svc.latency({ address: '2001:db8::1' }), 'unsupported');
+	const calls = [];
+	const svc = createHomeProxy({ call: async (o, m, p) => {
+		calls.push([o, m, p]);
+		if (m === 'node_latency') return { results: { n1: 12, n2: 'udp' } };
+		return { stdout: p.params.at(-1) === '192.0.2.1' ? '100% packet loss' : 'round-trip min/avg/max = 5.0/6.4/8.0 ms' };
+	} }, {});
+	assert.deepEqual(await svc.latency(['n1', 'n2']), { n1: 12, n2: 'udp' });
+	assert.deepEqual(calls[0], ['sight.homeproxy', 'node_latency', { nodes: ['n1', 'n2'] }]);
+	assert.equal(await svc.ping({ address: 'node.example' }), 6);
+	assert.equal(await svc.ping({ address: '192.0.2.1' }), 'timeout');
+	assert.equal(await svc.ping({ address: '2001:db8::1' }), 'unsupported');
+});
+
+test('诊断：日志时间统一成可比较的本地时间', async () => {
+	const { logTime } = await import('../src/service.js');
+	assert.equal(logTime('2026-10-19 14:08:11 [DAEMON] sing-box 1.12.25 started.'), '20261019140811');
+	assert.equal(logTime('Mon Oct 19 14:09:16 2026 daemon.err sing-box[1]: FATAL'), '20261019140916');
+	assert.equal(logTime('Sun Oct  5 03:00:01 2026 daemon.err sing-box[1]: FATAL'), '20261005030001');
+	assert.equal(logTime('\x1b[31mFATAL\x1b[0m[0000] decode config'), '');
+});
+
+test('诊断：启动时生成或检查配置失败、启动后退出、找不到原因', async () => {
+	const { diagnose } = await import('../src/service.js');
+	const checkFailed = [
+		'2026-10-19 14:06:00 [DAEMON] sing-box 1.12.25 started.',
+		'2026-10-19 14:06:42 [DAEMON] Service stopped.',
+		'\x1b[31mFATAL\x1b[0m[0000] decode config at /var/run/homeproxy/sing-box-c.json: outbounds[2].uuid: json: unknown field "uuid"',
+		'2026-10-19 14:06:42 [DAEMON] Error: wrong client configuration detected.',
+	].join('\n');
+	assert.deepEqual(diagnose(checkFailed, []), { reason: 'check', detail: 'decode config at /var/run/homeproxy/sing-box-c.json: outbounds[2].uuid: json: unknown field "uuid"', log: 'homeproxy' });
+	/* ucode 报错的第一行是原因，后面是调用位置 */
+	const generateFailed = ['2026-10-19 14:06:42 [DAEMON] Service stopped.', 'Reference error: access to undeclared variable x', 'In main(), file generate_client.uc, line 10, byte 5:', '2026-10-19 14:06:42 [DAEMON] Error: failed to generate client configuration.'].join('\n');
+	assert.deepEqual(diagnose(generateFailed, []), { reason: 'generate', detail: 'Reference error: access to undeclared variable x', log: 'homeproxy' });
+
+	const started = '2026-10-19 14:06:42 [DAEMON] Error: wrong client configuration detected.\n2026-10-19 14:08:11 [DAEMON] sing-box 1.12.25 started.\n';
+	const fatal = [
+		'Mon Oct 19 14:06:44 2026 daemon.err sing-box[1]: \x1b[31mFATAL\x1b[0m[0002] start service: context canceled',
+		'Mon Oct 19 14:09:16 2026 daemon.err sing-box[2]: \x1b[31mFATAL\x1b[0m[0005] start service: initialize rule-set[0]: EOF',
+		'Mon Oct 19 14:09:16 2026 daemon.info procd: Instance homeproxy::sing-box-c s in a crash loop 6 crashes, 5 seconds since last crash',
+	];
+	assert.deepEqual(diagnose(started, fatal), { reason: 'exited', detail: 'start service: initialize rule-set[0]: EOF', log: 'syslog' });
+	/* 这次启动之前的 FATAL 不算；服务日志被清空时不比较时间 */
+	assert.equal(diagnose(started, fatal.slice(0, 1)), null);
+	assert.equal(diagnose('', fatal.slice(0, 1)).detail, 'start service: context canceled');
+	assert.equal(diagnose(null, []), null);
 });
 
 test('新建段用具名段：前缀加随机串并避开已有名字；导入的多个节点各自取名', async () => {
@@ -157,4 +198,14 @@ test('自定义模式：切入时按模板建段并保持开关状态；开关�
 	await svc.setCustomPower(true, { ...custom, defaultOutbound: 'nil', lastOutbound: 'direct-out' });
 	await svc.setCustomPower(true, { ...custom, defaultOutbound: 'nil', lastOutbound: 'gone' });
 	assert.deepEqual(calls.map(c => c[3]), [{ default_outbound: 'nil', sight_last_outbound: 'sight_proxy' }, { default_outbound: 'direct-out' }, { default_outbound: 'sight_proxy' }]);
+});
+
+test('延迟分档与排序：快的在前，失败的其后，未测与不支持最后，同档保持原顺序', async () => {
+	const { latencyTone, sortByLatency } = await import('../src/service.js');
+	assert.deepEqual([1, 150, 151, 350, 351, 'timeout', 'refused', 'unresolved', 'error', 'unsupported', 'testing', undefined].map(latencyTone),
+		['fast', 'fast', 'fair', 'fair', 'slow', 'failed', 'failed', 'failed', 'failed', '', '', '']);
+	const nodes = ['a', 'b', 'c', 'd', 'e', 'f', 'g'].map(id => ({ id }));
+	const latency = { a: 'timeout', b: 320, c: 'unsupported', d: 45, e: 'refused', f: 45 };
+	assert.deepEqual(sortByLatency(nodes, latency).map(n => n.id), ['d', 'f', 'b', 'a', 'e', 'c', 'g']);
+	assert.deepEqual(nodes.map(n => n.id), ['a', 'b', 'c', 'd', 'e', 'f', 'g']);
 });

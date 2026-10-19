@@ -1,7 +1,7 @@
 {
 	"id": "adblock-fast",
 	"sdk": 1,
-	"version": "1.1.0+ad17cedd",
+	"version": "1.2.0+4f2f7e7c",
 	"path": "/adblock-fast",
 	"title": "Ad blocking",
 	"description": "Block ads and trackers for every device on your network using DNS block-lists.",
@@ -22,7 +22,8 @@
 				"blocked_domain": "Blocked domains",
 				"allowed_domain": "Allowed domains",
 				"name": "Name",
-				"url": "Address"
+				"url": "Address",
+				"action": "Type"
 			},
 			"types": [
 				"config",

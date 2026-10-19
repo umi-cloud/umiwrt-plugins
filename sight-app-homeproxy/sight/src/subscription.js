@@ -86,3 +86,26 @@ export function planRemoveGroup(nodes, source, hashes, used) {
 	const own = nodes.filter(n => sourceOf(n, hashes) === source);
 	return { remove: own.filter(n => !used.has(n.id)).map(n => n.id), kept: own.filter(n => used.has(n.id)).map(n => n.id) };
 }
+
+/**
+ * 纯函数：update_subscriptions.uc 每次运行（含定时更新）写的 /etc/homeproxy/subscription_status.json → 页面数据；内容损坏返回 null。
+ * result：ok 至少一个订阅取到节点并已写入；no_nodes 全部订阅都没取到，节点保持不变；error 脚本出错中止。
+ * 各订阅（按 hash）：ok 取到 nodes 个（原始条目 total 个，其余被过滤、重复或协议不支持）；fetch_failed 下载失败；no_nodes 下载到了但没有可用节点。
+ * 没取到节点的订阅，它原有的节点保持不变。
+ */
+export function parseStatus(text) {
+	let s;
+	try { s = JSON.parse(text); } catch { return null; }
+	if (!s || typeof s.time !== 'number') return null;
+	const subs = Array.isArray(s.subscriptions) ? s.subscriptions : [];
+	return {
+		time: s.time, result: ['ok', 'no_nodes', 'error'].includes(s.result) ? s.result : 'error', error: s.error || '',
+		added: s.added ?? 0, removed: s.removed ?? 0,
+		subscriptions: Object.fromEntries(subs.filter(x => x?.hash).map(x => [x.hash, { status: x.status, nodes: x.nodes ?? 0, total: x.total ?? 0 }])),
+	};
+}
+
+/** 纯函数：上次更新里没取到节点的订阅（按订阅地址的顺序）；状态里没有记录的（之后才添加的）不算 */
+export function failedSubscriptions(status, urls) {
+	return urls.map(subscriptionInfo).filter(g => status?.subscriptions[g.hash] && status.subscriptions[g.hash].status !== 'ok');
+}

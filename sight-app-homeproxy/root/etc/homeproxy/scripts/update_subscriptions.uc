@@ -8,7 +8,7 @@
 'use strict';
 
 import { md5 } from 'digest';
-import { open } from 'fs';
+import { open, writefile } from 'fs';
 import { connect } from 'ubus';
 import { cursor } from 'uci';
 
@@ -64,6 +64,15 @@ function filter_check(name) {
 /* Common var start */
 const node_cache = {},
       node_result = [];
+
+/* Sight：每次更新（含定时更新）的结果，供页面按订阅展示 */
+const sub_status = { time: time(), result: 'ok', subscriptions: [] };
+function write_status(result, extra) {
+	sub_status.result = result;
+	for (let k in extra)
+		sub_status[k] = extra[k];
+	writefile(`${HP_DIR}/subscription_status.json`, sprintf('%J', sub_status));
+}
 
 const ubus = connect();
 const sing_features = ubus.call('sight.homeproxy', 'singbox_get_features', {}) || {};
@@ -488,6 +497,7 @@ function main() {
 		const res = wGET(url, user_agent);
 		if (isEmpty(res)) {
 			log(sprintf('Failed to fetch resources from %s.', url));
+			push(sub_status.subscriptions, { hash: groupHash, status: 'fetch_failed' });
 			continue;
 		}
 
@@ -541,10 +551,12 @@ function main() {
 			log(sprintf('No valid node found in %s.', url));
 		else
 			log(sprintf('Successfully fetched %s nodes of total %s from %s.', count, length(nodes), url));
+		push(sub_status.subscriptions, { hash: groupHash, status: count ? 'ok' : 'no_nodes', nodes: count, total: length(nodes) });
 	}
 
 	if (isEmpty(node_result)) {
 		log('Failed to update subscriptions: no valid node found.');
+		write_status('no_nodes');
 
 		if (via_proxy !== '1') {
 			log('Starting service...');
@@ -654,6 +666,7 @@ function main() {
 
 	log(sprintf('%s nodes added, %s removed.', added, removed));
 	log('Successfully updated subscriptions.');
+	write_status('ok', { added, removed });
 }
 
 if (!isEmpty(subscription_urls))
@@ -663,6 +676,7 @@ if (!isEmpty(subscription_urls))
 		log('[FATAL ERROR] An error occurred during updating subscriptions:');
 		log(sprintf('%s: %s', e.type, e.message));
 		log(e.stacktrace[0].context);
+		write_status('error', { error: e.message });
 
 		log('Restarting service...');
 		service_action('stop');

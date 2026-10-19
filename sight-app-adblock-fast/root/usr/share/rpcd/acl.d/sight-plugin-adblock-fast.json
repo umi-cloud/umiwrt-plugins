@@ -1,10 +1,14 @@
 {
 	"sight-plugin-adblock-fast": {
-		"description": "Sight Ad blocking page: adblock-fast settings, block-lists, custom domains, service state and the automatic update schedule in root crontab",
+		"description": "Sight Ad blocking page: adblock-fast settings, block-lists, custom domains, service state, domain checks, timed pause and the automatic update schedule in root crontab",
 		"read": {
 			"ubus": {
 				"service": [
 					"list"
+				],
+				"sight.adblock-fast": [
+					"status",
+					"check"
 				]
 			},
 			"uci": [
@@ -23,6 +27,12 @@
 			"file": {
 				"/etc/crontabs/root": [
 					"write"
+				]
+			},
+			"ubus": {
+				"sight.adblock-fast": [
+					"pause",
+					"resume"
 				]
 			}
 		}

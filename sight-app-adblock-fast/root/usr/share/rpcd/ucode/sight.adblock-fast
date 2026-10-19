@@ -1,0 +1,137 @@
+// 广告过滤（对象 sight.adblock-fast）：adblock-fast 自身没有的页面接口——域名检查、限时暂停与可用内存。
+// 检查直接在当前生效的拦截表里按 DNS 的最长匹配查找；暂停由 sight-adblock-pause 在后台停止服务、到时再启动。
+// 失败按 docs/rpc.md 用状态码。
+
+'use strict';
+
+import * as fs from 'fs';
+import { cursor } from 'uci';
+import { STATUS, fail, shellquote } from 'sight.rpc';
+
+const DIR = '/var/run/sight-adblock-fast';
+const RUNNER = '/usr/libexec/sight-adblock-pause';
+const DNSMASQ_FILE = '/var/run/adblock-fast/adblock-fast.dnsmasq';
+/* 各 dns 模式的拦截表位置，与 adblock-fast.uc 的 dns_modes 一致 */
+const FILES = {
+	'dnsmasq.addnhosts': '/var/run/adblock-fast/dnsmasq.addnhosts',
+	'dnsmasq.conf': DNSMASQ_FILE,
+	'dnsmasq.ipset': DNSMASQ_FILE,
+	'dnsmasq.nftset': DNSMASQ_FILE,
+	'dnsmasq.servers': '/var/run/adblock-fast/dnsmasq.servers',
+	'smartdns.domainset': '/var/run/adblock-fast/smartdns.domainset',
+	'smartdns.ipset': '/var/run/adblock-fast/smartdns.ipset',
+	'smartdns.nftset': '/var/run/adblock-fast/smartdns.nftset',
+	'unbound.adb_list': '/var/lib/unbound/adb_list.adblock-fast',
+};
+const DOMAIN = /^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9-]{2,63}$/;
+const MAX_MINUTES = 1440;
+
+function config() {
+	const ctx = cursor();
+	const c = { dns: ctx.get('adblock-fast', 'config', 'dns') || 'dnsmasq.servers', enabled: ctx.get('adblock-fast', 'config', 'enabled') == '1' };
+	ctx.unload();
+	return c;
+}
+
+/* 某个域名在各格式里的拦截行与放行行；只有 dnsmasq.servers 用 server=/d/# 把放行域名写进表里 */
+function lines(mode, d) {
+	switch (mode) {
+	case 'dnsmasq.servers': return { block: [`server=/${d}/`], allow: [`server=/${d}/#`] };
+	case 'dnsmasq.conf': return { block: [`local=/${d}/`, `address=/${d}/`] };
+	case 'dnsmasq.ipset': return { block: [`ipset=/${d}/adb`] };
+	case 'dnsmasq.nftset': return { block: [`nftset=/${d}/4#inet#fw4#adb4`, `nftset=/${d}/4#inet#fw4#adb4,6#inet#fw4#adb6`] };
+	case 'dnsmasq.addnhosts': return { block: [`127.0.0.1 ${d}`, `:: ${d}`] };
+	case 'unbound.adb_list': return { block: [`local-zone: "${d}." always_nxdomain`] };
+	default: return { block: [d] };
+	}
+}
+
+/* 域名本身及各级上级域名，最具体的在前；hosts 格式只按完整域名匹配 */
+function candidates(mode, domain) {
+	if (mode == 'dnsmasq.addnhosts') return [domain];
+	const labels = split(domain, '.'), out = [];
+	for (let i = 0; i < length(labels) - 1; i++) push(out, join('.', slice(labels, i)));
+	return out;
+}
+
+/* 暂停状态：截止时刻写在 until，后台进程退出（或从未起来）就不算暂停 */
+function pause_state() {
+	const end = int(trim(fs.readfile(DIR + '/until') || '0'));
+	if (!end) return null;
+	const pid = int(trim(fs.readfile(DIR + '/pid') || '0'));
+	const cmdline = pid ? fs.readfile(`/proc/${pid}/cmdline`) || '' : '';
+	const st = fs.stat(DIR + '/until');
+	if (index(cmdline, RUNNER) < 0 && !(st && time() - st.mtime < 10)) return null;
+	return { until: end, pid: index(cmdline, RUNNER) >= 0 ? pid : 0 };
+}
+
+function mem_available() {
+	const m = match(fs.readfile('/proc/meminfo') || '', /MemAvailable:\s+(\d+) kB/);
+	return m ? int(m[1]) * 1024 : 0;
+}
+
+const methods = {
+	status: {
+		call: function() {
+			const p = pause_state();
+			return { paused: !!p, remaining: p ? max(0, p.until - time()) : 0, mem_available: mem_available() };
+		}
+	},
+
+	check: {
+		args: { domain: 'ads.example.com' },
+		call: function(req) {
+			const domain = type(req.args?.domain) == 'string' ? lc(trim(req.args.domain)) : null;
+			if (!domain || length(domain) > 253 || !match(domain, DOMAIN)) return fail(req, STATUS.INVALID_ARGUMENT);
+			const c = config();
+			const file = FILES[c.dns];
+			if (!file) return fail(req, STATUS.NOT_SUPPORTED);
+			if (!fs.access(file)) return fail(req, STATUS.NO_DATA);
+			const names = candidates(c.dns, domain), args = [];
+			for (let d in names) {
+				const l = lines(c.dns, d);
+				for (let s in [...l.block, ...(l.allow || [])]) push(args, '-e', shellquote(s));
+			}
+			const p = fs.popen(`grep -F -x ${join(' ', args)} ${shellquote(file)} 2>/dev/null`, 'r');
+			const found = {};
+			for (let s in split(p?.read('all') || '', '\n')) if (s) found[s] = true;
+			p?.close();
+			/* DNS 按最具体的规则生效 */
+			for (let d in names) {
+				const l = lines(c.dns, d);
+				for (let s in l.allow || []) if (found[s]) return { blocked: false, match: d };
+				for (let s in l.block) if (found[s]) return { blocked: true, match: d };
+			}
+			return { blocked: false, match: null };
+		}
+	},
+
+	pause: {
+		args: { minutes: 15 },
+		call: function(req) {
+			const minutes = req.args?.minutes;
+			if (type(minutes) != 'int' || minutes < 1 || minutes > MAX_MINUTES) return fail(req, STATUS.INVALID_ARGUMENT);
+			if (!config().enabled) return fail(req, STATUS.NOT_SUPPORTED);
+			fs.mkdir(DIR, 0700);
+			const running = pause_state();
+			fs.writefile(DIR + '/until.tmp', `${time() + minutes * 60}\n`);
+			fs.rename(DIR + '/until.tmp', DIR + '/until');
+			/* 已在暂停中只改截止时刻，后台进程每两秒重读 */
+			if (!running) system(`${RUNNER} </dev/null >/dev/null 2>&1 &`);
+			return {};
+		}
+	},
+
+	/* 取消暂停：删掉截止时刻，后台进程随即退出且不启动服务；需要时由页面接着启动或重启 */
+	resume: {
+		call: function() {
+			const p = pause_state();
+			fs.unlink(DIR + '/until');
+			if (p?.pid) system(['kill', '' + p.pid]);
+			fs.unlink(DIR + '/pid');
+			return {};
+		}
+	},
+};
+
+return { 'sight.adblock-fast': methods };

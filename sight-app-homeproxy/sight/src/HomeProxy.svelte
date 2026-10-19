@@ -1,14 +1,14 @@
 <script>
 	import { onDestroy, tick } from 'svelte';
-	import { t, errorText, client, route, navigate, activity, useEditor, requestLeave, editing, uci, pending, saveFlow, createClients, isMac, Card, Switch, Button, Badge, StatusHero, Callout, LogView, Select, Input, Textarea, Checkbox, RadioGroup, SettingRow, DynamicList, Field, Tabs, Drawer, Dialog, FormActions, ErrorSummary, Feedback, Table, Toolbar } from '@sight/sdk';
-	import { createHomeProxy, MODES, LOGS, SITES, RESOURCES, ACCESS, DNS_PRESETS, CHINA_DNS_PRESETS, validateSubscriptions, validateRouting, previewLinks, missingResources, DOMAIN_LISTS, parseDomains, validateDomains } from './service.js';
-	import { nodeGroups, sourceOf, MANUAL, ORPHAN } from './subscription.js';
+	import { t, errorText, client, createPoller, route, navigate, activity, useEditor, requestLeave, editing, uci, pending, saveFlow, createClients, isMac, Card, Switch, Button, Badge, StatusHero, Callout, LogView, Select, Input, Textarea, Checkbox, RadioGroup, SettingRow, DynamicList, Field, Tabs, Drawer, Dialog, FormActions, ErrorSummary, Feedback, Table, Toolbar } from '@sight/sdk';
+	import { createHomeProxy, MODES, LOGS, SITES, RESOURCES, ACCESS, DNS_PRESETS, CHINA_DNS_PRESETS, validateSubscriptions, validateRouting, previewLinks, missingResources, DOMAIN_LISTS, parseDomains, validateDomains, LATENCY_BATCH, latencyTone, sortByLatency } from './service.js';
+	import { nodeGroups, sourceOf, failedSubscriptions, MANUAL, ORPHAN } from './subscription.js';
 	import { TEMPLATES, find, DIRECT, BLOCK } from './routing.js';
 	import NodeForm from './NodeForm.svelte';
 	import SubscriptionTools from './SubscriptionTools.svelte';
 	import CustomRouting from './CustomRouting.svelte';
 
-	/* 顶部状态卡（开关、当前节点、连通性）常驻；其余按任务分区：节点、分流与 DNS、设备、订阅与规则库、日志。
+	/* 顶部状态卡（开关、当前节点、连通性，没在运行时附上原因）常驻；其余按任务分区：节点、分流与 DNS、设备、订阅与规则库、日志。
 	   节点编辑（NodeForm）、订阅归组与过滤（SubscriptionTools）、自定义分流（CustomRouting）各自成组件，这里只做接入。
 	   配置保存即生效（带失联回滚）；订阅/规则库更新、连通性检查、清空日志为即时操作。 */
 	const svc = createHomeProxy(client, uci);
@@ -16,14 +16,15 @@
 	const SECTIONS = ['nodes', 'routing', 'devices', 'subscriptions', 'logs'];
 	const tabsId = $props.id();
 	let section = $state(SECTIONS.includes(route.params.tab) ? route.params.tab : 'nodes');
-	$effect(() => { if (SECTIONS.includes(route.params.tab)) section = route.params.tab; });
+	/* 不带 tab 的地址（如从侧栏进入）回到节点分区 */
+	$effect(() => { section = SECTIONS.includes(route.params.tab) ? route.params.tab : 'nodes'; });
 
 	let data = $state(undefined);   // undefined 加载中；null 未安装
 	let error = $state('');
 	let notice = $state(null);
 	let busy = $state(false);
 	let alive = true, version = 0, seenDiscard = editing.discarded;
-	onDestroy(() => { alive = false; version++; });
+	onDestroy(() => { alive = false; version++; logPoller.stop(); });
 
 	/* 各分区的编辑草稿；load 后按配置重置 */
 	let subs = $state([]), subsDraft = $state(''), subsBaseline = $state('[]'), subsError = $state('');
@@ -124,6 +125,21 @@
 		if (alive) checks = { ...checks, [site]: result };
 	}
 	const siteLabel = s => ({ google: 'Google', baidu: t('Baidu') }[s]);
+	/* 代理开着但 sing-box 没在运行：从服务日志与系统日志里找原因；找不到时只保留状态卡上的提示 */
+	let diagnosis = $state(null);
+	$effect(() => { if (data?.enabled && data.running === false) loadDiagnosis(); else diagnosis = null; });
+	async function loadDiagnosis() {
+		let d = null;
+		try { d = await svc.diagnosis(); } catch { /* 诊断只是辅助信息 */ }
+		if (alive) diagnosis = d;
+	}
+	const diagnosisText = d => t({ generate: 'sing-box did not start: the client configuration could not be generated (%s).', check: 'sing-box did not start: it rejected the generated configuration (%s).', exited: 'sing-box stopped soon after starting (%s).' }[d.reason], d.detail || t('see the log'));
+	async function showDiagnosisLog() {
+		if (diagnosis.log === 'syslog') { await navigate('/logs'); return; }
+		logName = diagnosis.log;
+		section = 'logs';
+		await changeSection('logs');
+	}
 
 	/* --- 节点：导入与删除 --- */
 	const preview = $derived(importing && data ? previewLinks(importing.text, data.features) : []);
@@ -147,14 +163,16 @@
 		: n.id === data.mainNode && data.enabled ? t('Main node') : n.id === data.udpNode ? t('UDP node') : '';
 	/* 被配置引用的节点（含停用的出站、关闭代理前的主节点）不能删 */
 	const nodeBusy = n => n.id === data.mainNode || n.id === data.udpNode || data.used.includes(n.id);
-	/* 订阅常带来几十上百个节点：表格列出，按名称、地址或协议检索，可按来源（各订阅/手工添加）筛选；使用中的节点排在最前 */
-	let nodeQuery = $state(''), nodeSource = $state('all');
+	/* 订阅常带来几十上百个节点：表格列出，按名称、地址或协议检索，可按来源（各订阅/手工添加）筛选；默认使用中的节点排在最前，
+	   测过延迟后可按延迟排序（测试进行中保持原顺序，避免行跳动） */
+	let nodeQuery = $state(''), nodeSource = $state('all'), nodeSort = $state('default');
 	const groups = $derived(data ? nodeGroups(data.subscriptions, data.nodes) : { groups: [], manual: 0, orphan: 0 });
 	const groupHashes = $derived(new Set(groups.groups.map(g => g.hash)));
 	const nodeRows = $derived.by(() => {
 		const q = nodeQuery.trim().toLowerCase();
 		const list = (data?.nodes || []).filter(n => (nodeSource === 'all' || sourceOf(n, groupHashes) === nodeSource) && (!q || `${n.label} ${n.type} ${n.address}`.toLowerCase().includes(q)));
-		return [...list].sort((a, b) => !!nodeUse(b) - !!nodeUse(a));
+		const byUse = [...list].sort((a, b) => !!nodeUse(b) - !!nodeUse(a));
+		return nodeSort === 'latency' && !testing ? sortByLatency(byUse, latency) : byUse;
 	});
 	const sourceName = n => { const src = sourceOf(n, groupHashes); return src === MANUAL ? t('Added manually') : src === ORPHAN ? t('Removed subscription') : groups.groups.find(g => g.hash === src)?.title; };
 	const nodeCells = n => [{ text: n.label }, { text: n.type.toUpperCase(), nowrap: true }, { text: n.address ? `${n.address}:${n.port}` : '-', mono: true }, { text: '' }, { text: sourceName(n) }];
@@ -172,24 +190,37 @@
 		const ok = await write(() => svc.saveNode(id, plan, data), id ? t('Node %s saved.', plan.values.label) : t('Node %s added.', plan.values.label));
 		if (ok && alive) nodeEditing = null;
 	}
-	/* 延迟：路由器直接 ping 各节点服务器，最多 4 个同时进行；结果只保留在本页 */
-	let latency = $state({});       // 节点 id → undefined | 'testing' | 毫秒 | 'timeout' | 'unsupported' | 'error'
+	/* 延迟：路由器直接连接各节点服务器的端口，按批测 TCP 握手耗时；只走 UDP 的节点改为 ping，最多 4 个同时进行。结果只保留在本页 */
+	let latency = $state({});       // 节点 id → undefined | 'testing' | 毫秒 | 'timeout' | 'refused' | 'unresolved' | 'unsupported' | 'error'
 	let testing = $state(false);
 	async function testLatency() {
 		if (testing) return;
 		testing = true;
-		const queue = [...nodeRows];
-		latency = Object.fromEntries(queue.map(n => [n.id, 'testing']));
+		const rows = [...nodeRows], udp = [];
+		latency = Object.fromEntries(rows.map(n => [n.id, 'testing']));
+		for (let i = 0; i < rows.length && alive; i += LATENCY_BATCH) {
+			const batch = rows.slice(i, i + LATENCY_BATCH);
+			let r = {};
+			try { r = await svc.latency(batch.map(n => n.id)); } catch { /* 整批记为失败 */ }
+			if (!alive) return;
+			const next = { ...latency };
+			for (const n of batch) { if (r[n.id] === 'udp') udp.push(n); else next[n.id] = r[n.id] ?? 'error'; }
+			latency = next;
+		}
 		const worker = async () => {
-			for (let n = queue.shift(); n && alive; n = queue.shift()) {
+			for (let n = udp.shift(); n && alive; n = udp.shift()) {
 				let result;
-				try { result = await svc.latency(n); } catch { result = 'error'; }
+				try { result = await svc.ping(n); } catch { result = 'error'; }
 				if (alive) latency = { ...latency, [n.id]: result };
 			}
 		};
 		await Promise.all(Array.from({ length: 4 }, worker));
-		if (alive) testing = false;
+		/* 测完直接按延迟排好，最快的在最前 */
+		if (alive) { testing = false; nodeSort = 'latency'; }
 	}
+	const tested = $derived(Object.keys(latency).length > 0);
+	const latencyText = l => l === undefined ? '-' : typeof l === 'number' ? t('%d ms', l)
+		: { testing: t('Testing…'), timeout: t('No reply'), refused: t('Refused'), unresolved: t('Name not resolved'), unsupported: t('Not supported') }[l] || t('Failed');
 
 	/* --- 自定义域名（文件，保存即写入并重载服务，不走暂存） --- */
 	let domains = $state(null), domainsBase = $state(null), domainsError = $state(''), domainsLoadError = $state(''), domainsBusy = $state(false);
@@ -278,15 +309,40 @@
 		subsError = errs.length ? t(errs[0]) : '';
 		if (!errs.length) await write(() => svc.saveSubscriptions(next));
 	}
+	/* 上次更新（含定时更新）的结果；undefined 未读取，null 还没更新过或读不到 */
+	let subStatus = $state(undefined);
+	async function loadSubStatus() {
+		let s = null;
+		try { s = await svc.subscriptionStatus(); } catch { /* 读不到时不显示更新结果 */ }
+		if (alive) subStatus = s;
+		return s;
+	}
+	$effect(() => { if (data && section === 'subscriptions' && subStatus === undefined) loadSubStatus(); });
+	/* 脚本总是正常退出：以它写的状态文件为准，按时间戳判断是不是这次写的；没有新状态时退回看退出码 */
+	function updateNotice(s, r) {
+		if (!s) return r.ok ? { tone: 'success', text: t('Subscriptions updated. Nodes are refreshed from the saved subscription addresses.') } : { tone: 'error', text: t('Subscription update failed: %s', r.output || t('unknown error')) };
+		if (s.result === 'error') return { tone: 'error', text: t('Subscription update failed: %s', s.error || t('unknown error')) };
+		if (s.result === 'no_nodes') return { tone: 'error', text: t('No usable nodes were fetched from any subscription. Existing nodes were kept.') };
+		const failed = failedSubscriptions(s, data.subscriptions);
+		if (failed.length) return { tone: 'error', text: t('Subscriptions updated: %d nodes added, %d removed. Nothing usable was fetched from %s, so its existing nodes were kept.', s.added, s.removed, failed.map(g => g.title).join(', ')) };
+		return { tone: 'success', text: t('Subscriptions updated: %d nodes added, %d removed.', s.added, s.removed) };
+	}
 	async function updateSubs() {
 		if (locked) return;
 		updating = true; notice = null;
+		const before = subStatus?.time;
 		try {
 			const r = await svc.updateSubscriptions();
-			if (alive) notice = r.ok ? { tone: 'success', text: t('Subscriptions updated. Nodes are refreshed from the saved subscription addresses.') } : { tone: 'error', text: t('Subscription update failed: %s', r.output || t('unknown error')) };
+			const s = await loadSubStatus();
+			if (alive) notice = updateNotice(s && s.time !== before ? s : null, r);
 		} catch (e) { if (alive) notice = { tone: 'error', text: errorText(e) }; }
 		finally { if (alive) { updating = false; await load(); } }
 	}
+	const pad = n => String(n).padStart(2, '0');
+	const timeText = sec => { const d = new Date(sec * 1000); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+	const subStatusText = s => s.result === 'error' ? t('Last update (%s) failed: %s', timeText(s.time), s.error || t('unknown error'))
+		: s.result === 'no_nodes' ? t('Last update (%s) fetched no usable nodes; existing nodes were kept.', timeText(s.time))
+		: t('Last updated %s: %d nodes added, %d removed.', timeText(s.time), s.added, s.removed);
 	/* 代理开着时进页面就读版本：当前模式依赖的规则库缺失要在顶部提醒 */
 	$effect(() => { if (data && (data.enabled || section === 'subscriptions') && !resources && !resourcesError) loadResources(); });
 	const missing = $derived(data?.enabled ? missingResources(data.mode, resources) : []);
@@ -312,13 +368,18 @@
 
 	/* --- 日志 --- */
 	let logRequest = 0;
-	async function loadLog() {
+	/* quiet：跟随时的定时刷新，不先清空成加载中 */
+	async function loadLog(quiet = false) {
 		const request = ++logRequest, name = logName;
-		logText = undefined; logError = '';
-		try { const text = await svc.log(name); if (alive && request === logRequest) logText = text; }
+		if (!quiet) { logText = undefined; logError = ''; }
+		try { const text = await svc.log(name); if (alive && request === logRequest) { logText = text; logError = ''; } }
 		catch (e) { if (alive && request === logRequest) { logText = null; logError = errorText(e); } }
 	}
 	$effect(() => { if (section === 'logs') { logName; loadLog(); } });
+	/* 跟随：停留在日志分区时每 5 秒刷新当前日志 */
+	let follow = $state(false);
+	const logPoller = createPoller(() => loadLog(true), 5000);
+	$effect(() => { if (follow && section === 'logs') logPoller.start(); else logPoller.stop(); });
 	/* 清空日志不可撤销：确认后执行，期间锁定其它操作 */
 	async function cleanLog() {
 		if (locked) return;
@@ -334,7 +395,7 @@
 		<span class="node-name"><strong>{raw.text}</strong>{#if use}<Badge tone="success">{use}</Badge>{/if}</span>
 	{:else if colIndex === 3}
 		{@const l = latency[n.id]}
-		<span data-latency={typeof l === 'number' ? 'ok' : l || 'none'}>{l === undefined ? '-' : l === 'testing' ? t('Testing…') : l === 'timeout' ? t('No reply') : l === 'unsupported' ? t('Not supported') : l === 'error' ? t('Failed') : t('%d ms', l)}</span>
+		<span class="latency" data-latency={typeof l === 'number' ? 'ok' : l || 'none'} data-tone={latencyTone(l) || undefined}>{latencyText(l)}</span>
 	{:else}{raw.text}{/if}
 {/snippet}
 
@@ -383,6 +444,11 @@
 				</div>
 			</StatusHero>
 		</Card>
+		{#if diagnosis}
+			<Callout tone="danger" data-hp-diagnosis={diagnosis.reason} message={diagnosisText(diagnosis)}>
+				<Button size="compact" onclick={showDiagnosisLog}>{diagnosis.log === 'syslog' ? t('Open system log') : t('View log')}</Button>
+			</Callout>
+		{/if}
 		{#if missing.length}
 			<Callout data-hp-missing message={t('Rule data needed by the current routing mode has not been downloaded (%s), so traffic may not be routed correctly.', missing.map(resourceLabel).join(', '))}>
 				<Button size="compact" disabled={locked} onclick={downloadMissing}>{resourceBusy ? t('Updating…') : t('Download now')}</Button>
@@ -405,8 +471,14 @@
 							{#if groups.orphan}<option value={ORPHAN}>{t('Removed subscription')} ({groups.orphan})</option>{/if}
 						</Select>
 					{/if}
+					{#if tested}
+						<Select size="compact" bind:value={nodeSort} disabled={testing} aria-label={t('Sort nodes')} data-hp-sort>
+							<option value="default">{t('In use first')}</option>
+							<option value="latency">{t('Fastest first')}</option>
+						</Select>
+					{/if}
 					{#snippet actions()}
-						<Button size="compact" onclick={testLatency} disabled={testing || !nodeRows.length} title={t('Pings each node’s server from the router. It shows how far the server is, not how fast the proxy is; servers that block ping show “No reply”.')}>{testing ? t('Testing…') : t('Test latency')}</Button>
+						<Button size="compact" onclick={testLatency} disabled={testing || !nodeRows.length} title={t('Connects from the router to each node’s server port and measures the TCP handshake. It shows whether the server is online and how far it is, not how fast the proxy is. UDP-only nodes (Hysteria2, TUIC) are pinged instead.')}>{testing ? t('Testing…') : t('Test latency')}</Button>
 						<Button size="compact" onclick={openImport} disabled={locked}>{t('Import links')}</Button>
 						<Button variant="primary" size="compact" onclick={() => openNode()} disabled={locked}>{t('Add node')}</Button>
 					{/snippet}
@@ -550,6 +622,7 @@
 							<Button onclick={updateSubs} disabled={locked || !data.subscriptions.length || subsDirty}>{updating ? t('Updating…') : t('Update now')}</Button>
 						</FormActions>
 					</form>
+					{#if subStatus && data.subscriptions.length}<p class="muted sub-status" data-hp-sub-status={subStatus.result}>{subStatusText(subStatus)}</p>{/if}
 					<!-- 开关即时生效，放在表单外，不与未保存的订阅地址混在一起 -->
 					<div class="options">
 						<SettingRow id="homeproxy-update-automatically" label={t('Update automatically')} description={t('Fetch nodes from the subscriptions on a schedule.')}>
@@ -560,7 +633,7 @@
 						</SettingRow>
 					</div>
 				</Card>
-				<SubscriptionTools {data} {svc} {locked} {write} onshow={showSource} />
+				<SubscriptionTools {data} {svc} {locked} {write} onshow={showSource} status={subStatus} />
 				<Card title={t('Routing rule data')}>
 					<p class="muted lead">{t('Address and domain lists that decide what goes direct. Updating downloads the latest lists.')}</p>
 					{#if resourcesError}<Feedback tone="error" message={t('Rule data versions could not be read: %s', resourcesError)} onretry={loadResources} compact />{/if}
@@ -585,6 +658,7 @@
 				<div class="log-tools">
 					<Tabs id={logTabsId} label={t('Logs')} size="compact" items={LOGS.map(l => ({ value: l, label: l === 'homeproxy' ? t('Service') : 'sing-box' }))} bind:value={logName} />
 					<span class="log-actions">
+						<span class="follow"><Switch checked={follow} aria-label={t('Follow')} onchange={on => follow = on} /><span aria-hidden="true">{t('Follow')}</span></span>
 						<Button size="compact" onclick={() => confirmClean = true} disabled={locked || !logText}>{t('Clear log')}</Button>
 						<Button size="compact" onclick={loadLog} disabled={logText === undefined}>{t('Refresh')}</Button>
 					</span>
@@ -639,6 +713,10 @@
 	.note { margin: 0 0 var(--sp-3); }
 	.node-name { display: inline-flex; align-items: center; flex-wrap: wrap; gap: var(--sp-2); }
 	.node-name strong { color: var(--heading-color); overflow-wrap: anywhere; }
+	.latency { font-variant-numeric: tabular-nums; white-space: nowrap; }
+	.latency[data-tone="fast"] { color: var(--status-success-text); }
+	.latency[data-tone="fair"] { color: var(--status-warning-text); }
+	.latency[data-tone="slow"], .latency[data-tone="failed"] { color: var(--status-danger-text); }
 	.muted { color: var(--text-muted); font-size: var(--fs-sm); }
 	.mono { font-family: var(--font-family-monospace); font-size: var(--fs-xs); overflow-wrap: anywhere; }
 	.form { display: flex; flex-direction: column; gap: var(--sp-5); container-type: inline-size; }
@@ -657,7 +735,9 @@
 	.resource-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 	.resource-copy strong { font-weight: var(--fw-medium); color: var(--heading-color); }
 	.log-tools { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); flex-wrap: wrap; margin-bottom: var(--sp-3); }
-	.log-actions { display: flex; gap: var(--sp-2); }
+	.log-actions { display: flex; align-items: center; gap: var(--sp-2); }
+	.follow { display: inline-flex; align-items: center; gap: var(--sp-1); margin-right: var(--sp-2); font-size: var(--fs-sm); }
+	.sub-status { margin: var(--sp-3) 0 0; }
 	.preview { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--sp-2); max-height: 40vh; overflow: auto; }
 	.preview li { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; font-size: var(--fs-sm); }
 	.clip { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }

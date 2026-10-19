@@ -1,7 +1,7 @@
 /*
  * HomeProxy（sing-box 客户端）的 Sight 页面取数服务。按日常任务管理：代理开关与主节点、节点添加/编辑（node.js）、
  * 分享链接导入与删除、分流模式、UDP 节点与 DNS、自定义分流（routing.js）、哪些局域网设备走代理、
- * 订阅（来源归组、过滤，subscription.js）与规则库更新、连通性检查、日志。服务端不在页面范围内。
+ * 订阅（来源归组、过滤、更新结果，subscription.js）与规则库更新、连通性检查、启动失败诊断、日志。服务端不在页面范围内。
  * 配置写入会话暂存（页面保存后立即带回滚应用）；订阅/规则库更新、连通性检查、清空日志为即时操作。
  * 关闭代理即 main_node = 'nil'（后端约定的「禁用」）；自定义分流模式下主节点不生效，开关对应 routing.default_outbound。
  * 设备访问控制只管按 MAC 的名单（lan_proxy_mac_addrs / lan_direct_mac_addrs），按 IP 的名单原样保留。
@@ -11,7 +11,7 @@ import { probe, readFile, isIPv4, isIPv6, isHostname, isMac, toList as list, ign
 /* 启动项操作走宿主自带的 sight 对象（sight-ui ≥ 0.5.0，包依赖已约束） */
 const initAction = (client, name, action) => client.call('sight', 'setInitAction', { name, action });
 import { parseShareLink } from './sharelink.js';
-import { FILTER_MODES, nodesInUse, planFilter, validateFilter } from './subscription.js';
+import { FILTER_MODES, nodesInUse, planFilter, validateFilter, parseStatus } from './subscription.js';
 import { shapeCustom, planSettings, planTemplate, referrers, missingDeps, find, SECTION, OFF as CUSTOM_OFF, DIRECT, BLOCK } from './routing.js';
 
 export const MODES = ['bypass_mainland_china', 'gfwlist', 'proxy_mainland_china', 'global'];
@@ -37,11 +37,62 @@ export function parseDomains(text) {
 export function validateDomains(domains) {
 	return domains.every(isHostname) ? [] : ['Invalid domain'];
 }
+/* 节点延迟：rpcd 一次最多测 128 个，页面分批以便逐批显示 */
+export const LATENCY_BATCH = 64;
+/* 延迟快慢的分界（毫秒）：TCP 握手或 ping，到境外服务器 150 以内算快，350 以内一般 */
+export const LATENCY_FAST = 150, LATENCY_FAIR = 350;
+const LATENCY_FAILED = ['timeout', 'refused', 'unresolved', 'error'];
+/** 纯函数：延迟结果 → 'fast' | 'fair' | 'slow' | 'failed'；未测、测试中、不支持为空串 */
+export function latencyTone(l) {
+	if (typeof l === 'number') return l <= LATENCY_FAST ? 'fast' : l <= LATENCY_FAIR ? 'fair' : 'slow';
+	return LATENCY_FAILED.includes(l) ? 'failed' : '';
+}
+/** 纯函数：按延迟排序：有毫秒数的从快到慢，其后是失败的，最后是未测或不支持的；同档保持原顺序 */
+export function sortByLatency(nodes, latency) {
+	const key = n => { const l = latency[n.id]; return typeof l === 'number' ? [0, l] : [LATENCY_FAILED.includes(l) ? 1 : 2, 0]; };
+	return [...nodes].sort((a, b) => { const x = key(a), y = key(b); return x[0] - y[0] || x[1] - y[1]; });
+}
 /** 纯函数：ping 输出 → 平均延迟（毫秒，取整）；全部丢包或格式不符返回 null */
 export function parsePing(stdout) {
 	const m = String(stdout || '').match(/min\/avg\/max(?:\/\w+)? = [\d.]+\/([\d.]+)\//);
 	return m ? Math.max(1, Math.round(Number(m[1]))) : null;
 }
+
+const ANSI = /\x1b\[[0-9;]*m/g;
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const pad = n => String(n).padStart(2, '0');
+/** 纯函数：日志行开头的设备本地时间 → 可比较的 YYYYMMDDhhmmss；服务日志为 "2026-10-19 14:08:11 …"，系统日志为 "Mon Oct 19 14:08:11 2026 …" */
+export function logTime(line) {
+	let m = String(line).match(/^(\d{4})-(\d\d)-(\d\d) (\d\d):(\d\d):(\d\d) /);
+	if (m) return m.slice(1).join('');
+	m = String(line).match(/^\w{3} (\w{3}) +(\d{1,2}) (\d\d):(\d\d):(\d\d) (\d{4}) /);
+	return m && MONTHS.includes(m[1]) ? `${m[6]}${pad(MONTHS.indexOf(m[1]) + 1)}${pad(m[2])}${m[3]}${m[4]}${m[5]}` : '';
+}
+/** 去掉 sing-box 日志行的时间与级别前缀，只留错误内容 */
+const errorText = line => line.replace(ANSI, '').replace(/^.*?\b(?:FATAL|ERROR)\[\d+\]\s*/, '').trim();
+/**
+ * 纯函数：代理开着但 sing-box 没在运行时找原因。
+ * 服务日志（homeproxy.log）里最近一次启动失败（[DAEMON] Error: …，紧挨着的前几行是 generate_client.uc 或 sing-box check 的错误输出）
+ * 晚于最近一次成功启动时，原因是配置生成或检查失败；否则取系统日志里这次启动之后 sing-box 的最后一条 FATAL（启动后退出，
+ * procd 重试几次后放弃）。服务日志被清空、找不到启动记录时不比较时间。
+ * @param {string | null} serviceLog @param {string[]} fatalLines sight.homeproxy client_errors 的返回
+ * @returns {{ reason: 'generate' | 'check' | 'exited', detail: string, log: string } | null}
+ */
+export function diagnose(serviceLog, fatalLines = []) {
+	const lines = String(serviceLog || '').replace(ANSI, '').split('\n');
+	const failed = lines.findLastIndex(l => /\[DAEMON\] Error: .*client configuration/.test(l));
+	const started = lines.findLastIndex(l => /\[DAEMON\] sing-box .* started\./.test(l));
+	if (failed > started) {
+		let i = failed;
+		while (i > 0 && !logTime(lines[i - 1])) i--;
+		const detail = lines.slice(i, failed).map(errorText).find(Boolean) || '';
+		return { reason: /failed to generate/.test(lines[failed]) ? 'generate' : 'check', detail, log: 'homeproxy' };
+	}
+	const since = started >= 0 ? logTime(lines[started]) : '';
+	const fatal = fatalLines.filter(l => / sing-box\[\d+\]: /.test(l) && /FATAL/.test(l) && logTime(l) >= since).at(-1);
+	return fatal ? { reason: 'exited', detail: errorText(fatal), log: 'syslog' } : null;
+}
+
 export const ACCESS = ['disabled', 'listed_only', 'except_listed'];
 /* 预置 DNS 与上游 HomeProxy 的选项一致；wan 表示使用上联下发的 DNS */
 export const DNS_PRESETS = ['wan', '1.1.1.1', '8.8.8.8', '208.67.222.222', '223.5.5.5', '119.29.29.29'];
@@ -281,10 +332,15 @@ export function createHomeProxy(client, uci) {
 		async saveSubscriptionOptions({ autoUpdate, viaProxy }) {
 			await uci.set('homeproxy', 'subscription', { auto_update: autoUpdate ? '1' : '0', update_via_proxy: viaProxy ? '1' : '0' });
 		},
-		/** 按已生效的订阅地址拉取节点；脚本自行写入配置并重启服务 */
+		/** 按已生效的订阅地址拉取节点；脚本自行写入配置并重启服务。脚本总是正常退出，结果看它写的状态文件（subscriptionStatus） */
 		async updateSubscriptions() {
 			const r = await client.call('file', 'exec', { command: '/etc/homeproxy/scripts/update_subscriptions.uc', params: [] });
 			return { ok: (r.code ?? 0) === 0, output: `${r.stdout || ''}${r.stderr || ''}`.trim() };
+		},
+		/** @returns {Promise<ReturnType<typeof parseStatus>>} 最近一次订阅更新（含定时更新）的结果；还没更新过为 null */
+		async subscriptionStatus() {
+			const f = await readFile(client, '/etc/homeproxy/subscription_status.json');
+			return f.state === 'ok' ? parseStatus(f.data) : null;
 		},
 		/** @returns {Promise<Record<string, string | null>>} 规则库版本；文件不存在为 null */
 		async resourceVersions() {
@@ -328,13 +384,27 @@ export function createHomeProxy(client, uci) {
 			if (enabled) await initAction(client, 'homeproxy', 'reload');
 		},
 		/**
-		 * 到节点服务器的线路延迟：路由器直接 ping 服务器地址（不经代理），只反映线路远近，不代表代理速度。
+		 * 到节点服务器端口的 TCP 握手耗时：路由器直接连接（不经代理），反映服务器是否在线与线路远近，不代表代理速度。
+		 * @param {string[]} ids 节点段名，最多 LATENCY_BATCH 个
+		 * @returns {Promise<Record<string, number | 'timeout' | 'refused' | 'unresolved' | 'udp' | 'error'>>} 'udp' 为只走 UDP 的协议，改用 ping
+		 */
+		async latency(ids) {
+			const r = await client.call('sight.homeproxy', 'node_latency', { nodes: ids });
+			return r?.results || {};
+		},
+		/**
+		 * 只走 UDP 的节点（Hysteria2、TUIC 等）改由路由器 ping 服务器地址。
 		 * @returns {Promise<number | 'timeout' | 'unsupported'>} 毫秒；服务器不回应 ping 为 timeout；IPv6 地址暂不支持
 		 */
-		async latency(node) {
+		async ping(node) {
 			if (!isIPv4(node.address) && !isHostname(node.address)) return 'unsupported';
 			const r = await client.call('file', 'exec', { command: '/bin/ping', params: ['-4', '-c', '3', '-W', '1', node.address] });
 			return parsePing(r.stdout) ?? 'timeout';
+		},
+		/** 代理开着但 sing-box 没运行时的原因（diagnose）；读不到日志时返回 null，不影响页面 */
+		async diagnosis() {
+			const [service, errors] = await Promise.all([this.log('homeproxy'), client.call('sight.homeproxy', 'client_errors')]);
+			return diagnose(service, errors?.lines || []);
 		},
 		async cleanLog(name) {
 			if (!LOGS.includes(name)) throw new Error('Unknown log');

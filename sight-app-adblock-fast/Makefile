@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: GPL-2.0-only
 #
-# 广告过滤的 Sight 页面与权限：只含页面，服务本身由 adblock-fast 提供；状态读 procd 服务数据，启停用宿主的 sight.setInitAction。
+# 广告过滤的 Sight 页面与权限：服务本身由 adblock-fast 提供；状态读 procd 服务数据，启停用宿主的 sight.setInitAction；
+# 域名检查与限时暂停由本包的 rpcd 对象 sight.adblock-fast 提供。
 
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=sight-app-adblock-fast
-PKG_VERSION:=1.1.0
+PKG_VERSION:=1.2.0
 PKG_RELEASE:=1
 
 PKG_LICENSE:=GPL-2.0-only
@@ -25,8 +26,9 @@ define Package/sight-app-adblock-fast
 endef
 
 define Package/sight-app-adblock-fast/description
-  Manage adblock-fast from the Sight UI: turn ad blocking on or off, pick
-  block-lists, add blocked or allowed domains and see the current state.
+  Manage adblock-fast from the Sight UI: turn ad blocking on or off or pause
+  it for a while, pick or add block-lists, add blocked or allowed domains,
+  check whether a domain is blocked and see the current state.
 endef
 
 define Build/Compile

@@ -3,8 +3,9 @@
 	import { t, useEditor, editing, Card, Table, Button, Dialog, Select, Field, DynamicList, Input, FormActions, SettingRow, Disclosure, ErrorSummary } from '@sight/sdk';
 	import { nodeGroups, planRemoveGroup, filtered, validateFilter, subscriptionInfo, FILTER_MODES, ORPHAN } from './subscription.js';
 
-	/* 订阅分区的两张卡：按订阅查看/删除节点、订阅过滤设置。write 为页面的保存流程，svc 为页面的取数服务。 */
-	let { data, svc, locked = false, write, onshow } = $props();
+	/* 订阅分区的两张卡：按订阅查看/删除节点（含上次更新结果）、订阅过滤设置。write 为页面的保存流程，svc 为页面的取数服务，
+	   status 为 subscription.js 的 parseStatus 结果（还没更新过为 null）。 */
+	let { data, svc, locked = false, write, onshow, status = null } = $props();
 
 	/* --- 按订阅归组 --- */
 	const groups = $derived(nodeGroups(data.subscriptions, data.nodes));
@@ -22,7 +23,16 @@
 		await write(() => svc.removeNodes(plan.remove, data), plan.kept.length ? t('Deleted %d nodes. %d nodes in use were kept.', plan.remove.length, plan.kept.length) : t('Deleted %d nodes.', plan.remove.length));
 		removing = null;
 	}
-	const cells = r => [{ text: r.title, strong: true }, { text: r.url || t('Nodes whose subscription address was removed. They are deleted at the next successful update.'), mono: !!r.url }, { text: String(r.count) }];
+	/* 没取到节点时脚本保留该订阅原有的节点 */
+	function lastUpdate(r) {
+		if (r.id === ORPHAN) return { text: '' };
+		const s = status?.subscriptions[r.id];
+		if (!s) return { text: t('Not updated yet') };
+		if (s.status === 'fetch_failed') return { text: t('Download failed'), badge: 'danger' };
+		if (s.status !== 'ok') return { text: t('No usable nodes'), badge: 'danger' };
+		return { text: t('Fetched %d nodes', s.nodes), muted: s.total > s.nodes ? t('%d skipped', s.total - s.nodes) : '' };
+	}
+	const cells = r => [{ text: r.title, strong: true }, { text: r.url || t('Nodes whose subscription address was removed. They are deleted at the next successful update.'), mono: !!r.url }, { text: String(r.count) }, lastUpdate(r)];
 
 	/* --- 过滤设置：重载只更新基线，未保存的草稿保留，除非用户已确认放弃 --- */
 	const snapshot = f => ({ mode: f.mode, keywords: [...f.keywords], userAgent: f.userAgent });
@@ -69,7 +79,7 @@
 </Dialog>
 
 <Card title={t('Nodes by subscription')} flush>
-	<Table headers={[t('Subscription'), t('Address'), t('Nodes')]} rate={[2]} {rows} {cells} rowKey={r => r.id} rowAttrs={r => ({ 'data-hp-group': r.id })}
+	<Table headers={[t('Subscription'), t('Address'), t('Nodes'), t('Last update')]} rate={[2]} {rows} {cells} rowKey={r => r.id} rowAttrs={r => ({ 'data-hp-group': r.id })}
 		{actions} actionsLabel={t('Actions')} empty={t('No subscriptions yet. Add a subscription address above, save, then update.')} />
 </Card>
 

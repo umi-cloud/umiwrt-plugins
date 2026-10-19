@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { md5 } from '../src/md5.js';
-import { subscriptionInfo, nodeGroups, sourceOf, filtered, validateFilter, planFilter, nodesInUse, planRemoveGroup, MANUAL, ORPHAN } from '../src/subscription.js';
+import { subscriptionInfo, nodeGroups, sourceOf, filtered, validateFilter, planFilter, nodesInUse, planRemoveGroup, parseStatus, failedSubscriptions, MANUAL, ORPHAN } from '../src/subscription.js';
 
 const hex = s => createHash('md5').update(s).digest('hex');
 
@@ -41,4 +41,17 @@ test('使用中的节点：主节点、UDP 节点、自动选择列表、自定�
 	assert.deepEqual([...nodesInUse(cfg)].sort(), ['a', 'b', 'c', 'd', 'e']);
 	const nodes = [{ id: 'a', grouphash: 'h' }, { id: 'x', grouphash: 'h' }, { id: 'y' }];
 	assert.deepEqual(planRemoveGroup(nodes, 'h', new Set(['h']), new Set(['a'])), { remove: ['x'], kept: ['a'] });
+});
+
+test('更新结果：解析状态文件；损坏为 null；没取到节点的订阅按地址顺序列出', () => {
+	assert.equal(parseStatus('not json'), null);
+	assert.equal(parseStatus('{}'), null);
+	const a = 'https://a.example/sub#Alpha', b = 'https://b.example/sub', c = 'https://c.example/new';
+	const s = parseStatus(JSON.stringify({ time: 1792389955, result: 'ok', added: 2, removed: 1, subscriptions: [
+		{ hash: md5('https://a.example/sub'), status: 'ok', nodes: 2, total: 3 }, { hash: md5(b), status: 'fetch_failed' }] }));
+	assert.deepEqual([s.time, s.result, s.added, s.removed], [1792389955, 'ok', 2, 1]);
+	assert.deepEqual(s.subscriptions[md5('https://a.example/sub')], { status: 'ok', nodes: 2, total: 3 });
+	assert.deepEqual(failedSubscriptions(s, [a, b, c]).map(g => g.title), ['b.example']);
+	assert.equal(parseStatus(JSON.stringify({ time: 1, result: 'boom' })).result, 'error');
+	assert.deepEqual(failedSubscriptions(null, [a]), []);
 });
