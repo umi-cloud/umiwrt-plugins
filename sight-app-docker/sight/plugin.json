@@ -1,10 +1,10 @@
 {
 	"id": "docker",
 	"title": "Docker",
-	"description": "Run containers on the router: create, edit and open them, see their CPU and memory use, check for and apply image updates, search Docker Hub and download images, use a terminal, run Compose projects, manage images, networks, volumes and storage, and set a registry mirror.",
+	"description": "Run containers on the router: create them (also from a docker run command), edit and open them, limit their logs, see their CPU and memory use, check for and apply image updates, search Docker Hub and download images, use a terminal, run Compose projects, manage images, networks (including LAN addresses with macvlan), volumes and storage, set a registry mirror, and move the data directory to a disk.",
 	"icon": "container",
 	"group": "applications",
-	"version": "1.6.0",
+	"version": "1.7.0",
 	"package": "sight-app-docker",
 	"changes": {
 		"dockerd": {

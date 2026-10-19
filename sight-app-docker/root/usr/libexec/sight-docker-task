@@ -9,10 +9,13 @@
  *             任一步失败删掉新容器、改回名字并恢复旧容器原来的运行状态。mode=update 时先拉取原镜像引用，
  *             没有新版则不重建
  *   compose   docker-compose up / pull / down / remove
- *   update    批量更新：对每个容器做 mode=update 的 recreate，失败的恢复原容器后继续下一个
+ *   update    批量重建：对每个容器做 recreate（mode=update 找新版，mode=edit 按新配置），失败的恢复原容器后继续下一个
  *   check     检查更新：逐个查询镜像标签在仓库里的摘要（不下载），写入 updates.json
+ *   migrate   换数据目录后迁移：重启 Docker（起不来则恢复原数据目录），按配置重建网络、卷（从旧目录复制数据）、
+ *             容器与 Compose 项目；旧数据目录不动，单项失败记下后继续
  */
 import { readfile, writefile, rename, access, unlink, rmdir, lsdir, stdout } from 'fs';
+import { cursor } from 'uci';
 import * as api from 'sight.docker_api';
 
 const DIR = '/tmp/sight-docker';
@@ -116,6 +119,25 @@ function inspect(id) {
 	return r.code == 200 ? r.body : null;
 }
 
+/* 新建容器：新建时只带主网络（旧版 API 不接受多个），其余网络建好后再连接。返回 { id } 或 { id?, error }（连接失败时容器已建） */
+function create_container(name, body) {
+	const endpoints = body.NetworkingConfig?.EndpointsConfig || {};
+	const primary = body.HostConfig?.NetworkMode || 'bridge';
+	const first = {}, extra = {};
+	for (let net, cfg in endpoints) {
+		if (net == primary) first[net] = cfg;
+		else extra[net] = cfg;
+	}
+	body.NetworkingConfig = { EndpointsConfig: first };
+	const c = api.request('POST', '/containers/create', { query: { name: name }, body: body });
+	if (c.code >= 300 || !c.body?.Id) return { error: api.reason(c) };
+	for (let net, cfg in extra) {
+		const r = api.request('POST', `/networks/${net}/connect`, { body: { Container: c.body.Id, EndpointConfig: cfg || {} } });
+		if (r.code >= 300) return { id: c.body.Id, error: api.reason(r) };
+	}
+	return { id: c.body.Id };
+}
+
 /* 用新配置重建一个容器（item：{ id, mode, new_name, body }），stage(步骤, 状态) 报告进度。
    成功返回 { result: 'recreated' | 'latest', warning? }；失败返回 { error, error_args?, rollback?, rollback_error? }，
    重建过程中失败时已删掉新容器、改回名字并恢复旧容器原来的运行状态 */
@@ -195,25 +217,11 @@ function recreate(item, stage) {
 	renamed = true;
 	stage('stop', 'done');
 
-	/* 新建时只带主网络（旧版 API 不接受多个），其余网络建好后再连接 */
 	stage('create', 'running');
 	log(`Creating ${new_name}`);
-	const endpoints = body.NetworkingConfig?.EndpointsConfig || {};
-	const primary = body.HostConfig?.NetworkMode || 'bridge';
-	const first = {}, extra = {};
-	for (let net, cfg in endpoints) {
-		if (net == primary) first[net] = cfg;
-		else extra[net] = cfg;
-	}
-	body.NetworkingConfig = { EndpointsConfig: first };
-	const c = api.request('POST', '/containers/create', { query: { name: new_name }, body: body });
-	if (c.code >= 300 || !c.body?.Id) return rollback(api.reason(c));
-	created = c.body.Id;
-	item.new_id = created;
-	for (let net, cfg in extra) {
-		const r = api.request('POST', `/networks/${net}/connect`, { body: { Container: created, EndpointConfig: cfg || {} } });
-		if (r.code >= 300) return rollback(api.reason(r));
-	}
+	const c = create_container(new_name, body);
+	if (c.id) { created = c.id; item.new_id = created; }
+	if (c.error) return rollback(c.error);
 	stage('create', 'done');
 
 	if (was_running) {
@@ -254,11 +262,11 @@ function run_recreate() {
 	finish('done');
 }
 
-/* 批量更新：每个容器一个步骤；已是最新的记为 skipped，失败的记下原因后继续 */
+/* 批量重建：每个容器一个步骤；mode=update 时已是最新的记为 skipped，失败的记下原因后继续 */
 function run_update() {
 	let failed = 0, updated = 0;
 	for (let item in task.items) {
-		item.mode = 'update';
+		item.mode = task.mode || 'update';
 		step(item.name, 'running');
 		log(`== ${item.name}`);
 		const r = recreate(item, () => save(false));
@@ -311,15 +319,19 @@ function run_check() {
 
 /* ---- Compose ---- */
 
+/* docker-compose 的命令前缀；远程守护进程经 env 设置 DOCKER_HOST，仍以参数数组执行 */
+function compose_base(name, managed) {
+	const dir = `${COMPOSE_DIR}/${name}`, host = api.cli_host(), base = [];
+	if (host) push(base, '/usr/bin/env', 'DOCKER_HOST=' + host);
+	push(base, COMPOSE, '--ansi', 'never', '--progress', 'plain', '-p', name);
+	if (managed) push(base, '--project-directory', dir, '-f', dir + '/compose.yaml');
+	return base;
+}
+
 function run_compose() {
 	const name = task.project, dir = `${COMPOSE_DIR}/${name}`, file = dir + '/compose.yaml';
 	const managed = !!access(file);
-	const host = api.cli_host();
-	const base = [];
-	/* 远程守护进程：经 env 设置 DOCKER_HOST，仍以参数数组执行 */
-	if (host) push(base, '/usr/bin/env', 'DOCKER_HOST=' + host);
-	push(base, COMPOSE, '--ansi', 'never', '--progress', 'plain', '-p', name);
-	if (managed) push(base, '--project-directory', dir, '-f', file);
+	const base = compose_base(name, managed);
 	const commands = {
 		up: [['up', '-d', '--remove-orphans']],
 		pull: [['pull'], ['up', '-d', '--remove-orphans']],
@@ -344,9 +356,100 @@ function run_compose() {
 	finish('done');
 }
 
+/* ---- 迁移到新数据目录 ---- */
+
+/* 等 Docker 可连，返回 /info；超时为 null */
+function wait_docker(sec) {
+	for (let i = 0; i < sec; i++) {
+		const r = api.request('GET', '/info', { timeout: 3000 });
+		if (r.code == 200) return r.body;
+		sleep(1);
+	}
+	return null;
+}
+
+function globals_section(ctx) {
+	let name = null;
+	ctx.foreach('dockerd', 'globals', (s) => { name ??= s['.name']; });
+	return name;
+}
+
+function run_migrate() {
+	const old_root = task.old_root, problems = [];
+	const problem = (what, name, error) => { push(problems, { what: what, name: name, error: error }); log(`${what} ${name}: ${error}`); };
+
+	/* 重启后 Docker 起不来：改回原数据目录再启动 */
+	step('restart', 'running');
+	log('Restarting Docker with the new data directory');
+	system(['/etc/init.d/dockerd', 'restart']);
+	const info = wait_docker(90);
+	if (!info) {
+		const ctx = cursor(), sec = globals_section(ctx);
+		if (sec) { ctx.set('dockerd', sec, 'data_root', old_root + '/'); ctx.commit('dockerd'); }
+		system(['/etc/init.d/dockerd', 'restart']);
+		task.restored = !!wait_docker(60);
+		finish('failed', 'Docker did not start with the new data directory, so the previous one was put back.');
+	}
+	task.new_root = rtrim(info.DockerRootDir || '', '/');
+	if (task.new_root == old_root) finish('failed', 'Docker is still using %s. Save the new data directory first.', [old_root]);
+	step('restart', 'done');
+
+	step('networks', 'running');
+	for (let n in task.networks) {
+		if (api.request('GET', `/networks/${n.Name}`).code == 200) continue;
+		const r = api.request('POST', '/networks/create', { body: n });
+		if (r.code >= 300) problem('network', n.Name, api.reason(r));
+		else log(`Created network ${n.Name}`);
+	}
+	step('networks', 'done');
+
+	/* 卷：同名新建后，把旧数据目录里的内容原样复制过去（保留属主、权限与链接） */
+	step('volumes', 'running');
+	for (let v in task.volumes) {
+		const r = api.request('POST', '/volumes/create', { body: { Name: v.name, Labels: v.labels || {} } });
+		if (r.code >= 300 || !r.body?.Mountpoint) { problem('volume', v.name, api.reason(r)); continue; }
+		const src = `${old_root}/volumes/${v.name}/_data`;
+		if (!access(src)) { log(`Volume ${v.name}: nothing to copy`); continue; }
+		log(`Copying volume ${v.name}`);
+		if (system(['cp', '-a', src + '/.', r.body.Mountpoint + '/'], 3600000) != 0) problem('volume', v.name, 'copying the data failed');
+	}
+	step('volumes', 'done');
+
+	/* 容器：镜像不在新目录里就先下载；原来在运行的启动 */
+	step('containers', 'running');
+	for (let c in task.containers) {
+		const image = c.body.Image;
+		if (api.request('GET', `/images/${image}/json`).code == 404) {
+			const error = pull(image);
+			if (error) { problem('container', c.name, error); continue; }
+		}
+		log(`Creating ${c.name}`);
+		const r = create_container(c.name, c.body);
+		if (r.error) { problem('container', c.name, r.error); continue; }
+		if (c.running) {
+			const s = api.request('POST', `/containers/${r.id}/start`);
+			if (s.code >= 300 && s.code != 304) problem('container', c.name, api.reason(s));
+		}
+	}
+	step('containers', 'done');
+
+	step('compose', 'running');
+	for (let p in task.projects) {
+		log(`$ docker-compose -p ${p} up -d`);
+		const rc = system([...compose_base(p, true), 'up', '-d', '--remove-orphans'], 3600000);
+		if (rc != 0) problem('project', p, sprintf('docker-compose exited with code %d', rc));
+	}
+	step('compose', 'done');
+
+	task.problems = problems;
+	if (length(problems)) finish('failed', '%d items could not be moved', [length(problems)]);
+	finish('done');
+}
+
 if (task.kind == 'pull') run_pull();
 else if (task.kind == 'recreate') run_recreate();
 else if (task.kind == 'compose') run_compose();
 else if (task.kind == 'update') run_update();
 else if (task.kind == 'check') run_check();
+else if (task.kind == 'migrate') run_migrate();
 finish('failed', 'Unknown task');

@@ -92,7 +92,7 @@ test('编辑：表单预填只含表单负责的部分，原样保存时参数�
 	assert.equal(form.name, 'web');
 	assert.equal(form.image, 'nginx:latest');
 	assert.deepEqual(form.ports, [{ host: '8080', container: '80', proto: 'tcp', ip: '' }, { host: '8081', container: '80', proto: 'tcp', ip: '127.0.0.1' }]);
-	assert.deepEqual(form.mounts, [{ host: '/mnt/data', container: '/data', readonly: true, options: ['rslave'] }]);
+	assert.deepEqual(form.mounts, [{ host: '/mnt/data', container: '/data', readonly: true, options: ['rslave'] }, { host: 'named', container: '/named', readonly: false, options: [] }]);
 	assert.deepEqual(form.env, ['TZ=Asia/Shanghai']);
 	assert.equal(form.restart, 'on-failure');
 	assert.equal(form.network, 'appnet');
@@ -113,7 +113,7 @@ test('编辑：改端口、目录、环境变量、命令、网络与重启策�
 	const c = inspect(), base = recreateBody(c, image);
 	const form = formFromInspect(c, base);
 	form.ports = [{ host: '9090', container: '8080', proto: 'tcp' }];
-	form.mounts = [{ host: '/mnt/new', container: '/cache', readonly: false }];
+	form.mounts = [form.mounts.find(m => m.host === 'named'), { host: '/mnt/new', container: '/cache', readonly: false }];
 	form.env = ['TZ=UTC'];
 	form.command = 'httpd -f -p 8080';
 	form.network = 'bridge';
@@ -126,7 +126,7 @@ test('编辑：改端口、目录、环境变量、命令、网络与重启策�
 	assert.deepEqual(body.Cmd, ['httpd', '-f', '-p', '8080']);
 	assert.deepEqual(body.HostConfig.PortBindings, { '9000/tcp': [{ HostIp: '', HostPort: '' }], '8080/tcp': [{ HostIp: '', HostPort: '9090' }] });
 	assert.deepEqual(body.ExposedPorts, { '9000/tcp': {}, '8080/tcp': {} }, '去掉不再映射的 80，补上新映射的端口');
-	/* 新目录占了匿名卷的挂载点：匿名卷让位，命名卷保留 */
+	/* 表单管理设备目录与命名卷；新目录占了匿名卷的挂载点：匿名卷让位 */
 	assert.deepEqual(body.HostConfig.Binds, ['named:/named', '/mnt/new:/cache']);
 	assert.deepEqual(body.HostConfig.RestartPolicy, { Name: 'always', MaximumRetryCount: 0 });
 	assert.equal(body.HostConfig.Privileged, true);

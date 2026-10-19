@@ -1,12 +1,18 @@
 <script>
 	import { onDestroy, tick } from 'svelte';
-	import { t, errorText, useEditor, activity, pending, saveFlow, Button, Callout, Card, Dialog, DynamicList, ErrorSummary, Feedback, FormActions, Input, SettingRow, SettingsGroup } from '@sight/sdk';
+	import { t, errorText, useEditor, activity, pending, saveFlow, Button, Callout, Card, Checkbox, Dialog, DynamicList, ErrorSummary, Feedback, FormActions, Input, SettingRow, SettingsGroup } from '@sight/sdk';
 	import { fmtBytes } from '@sight/sdk/lib';
 	import { validateSettings, pendingRestart, sameDir, diskOf, DEFAULT_DATA_ROOT, MIRROR_PRESETS } from './service.js';
 
 	/* Docker 设置（dockerd 的 uci globals 段）：镜像加速与数据目录。保存即生效：写入会话暂存后带回滚应用，
-	   dockerd 的 reload 重读镜像加速，但不换数据目录、也不清掉全部删除的加速地址；运行值与配置不一致时提示重启。 */
-	let { svc, root = '', mirrors = [], onreload } = $props();
+	   dockerd 的 reload 重读镜像加速，但不换数据目录、也不清掉全部删除的加速地址；运行值与配置不一致时提示重启。
+	   数据目录按分区选：已挂载的直接用，未挂载的先经宿主存储接口挂到 /mnt 下（开机自动挂载）。
+	   换数据目录时可勾选迁移：保存后交给页面的迁移任务（onmigrate，重启 Docker 并按配置重建），不勾选则提示重启。
+	   rootStatus：Docker 正在用的数据目录所在的文件系统（被新挂载的盘盖住时提示重启）；hasData：是否有容器或卷可迁 */
+	let { svc, root = '', mirrors = [], rootStatus = null, hasData = false, onreload, onmigrate } = $props();
+	let migrate = $state(true);
+	let mounting = $state('');
+	let mountError = $state('');
 	let base = $state(null);
 	let draft = $state(null);
 	let mirrorDraft = $state('');
@@ -39,11 +45,28 @@
 	const size = b => b >= 1099511627776 ? (b / 1099511627776).toFixed(1) + ' TB' : fmtBytes(b);
 	const draftDisk = $derived(disks && draft ? diskOf(draft.dataRoot.trim(), disks.usable) : null);
 	function useDisk(d) { if (!locked) draft.dataRoot = d.mount.replace(/\/+$/, '') + '/docker'; }
+	/* 挂载并使用：挂到 /mnt/<名称>，回读盘列表后填入 <挂载点>/docker */
+	async function mountAndUse(d) {
+		if (locked || mounting) return;
+		mounting = d.device; mountError = '';
+		try {
+			const target = await svc.mountDisk(d, (disks?.usable || []).map(u => u.mount));
+			const next = await svc.loadDisks();
+			if (!alive) return;
+			disks = next;
+			draft.dataRoot = target + '/docker';
+			await onreload?.();
+		} catch (e) { if (alive) mountError = t('Could not mount %s: %s', d.title, errorText(e)); }
+		finally { if (alive) mounting = ''; }
+	}
 
 	const configuredRoot = $derived(base ? base.dataRoot || DEFAULT_DATA_ROOT : '');
 	const rootChanged = $derived(!!draft && !sameDir(draft.dataRoot.trim() || DEFAULT_DATA_ROOT, root));
-	const restart = $derived(base ? pendingRestart(base, { root, mirrors }) : []);
-	const restartText = $derived(restart.includes('data-root') ? t('Docker is still using %s. Restart Docker to switch to %s.', root, configuredRoot)
+	/* 本次保存会换数据目录（与 Docker 正在用的不同，且是改动过的） */
+	const moving = $derived(rootChanged && !!base && draft.dataRoot.trim() !== base.dataRoot);
+	const restart = $derived(base ? [...pendingRestart(base, { root, mirrors }), ...(rootStatus?.shadowed ? ['shadowed'] : [])] : []);
+	const restartText = $derived(restart.includes('shadowed') ? t('A disk was mounted over %s while Docker was running, so Docker still uses the old location. Restart Docker to use the disk; images need to be downloaded again.', root)
+		: restart.includes('data-root') ? t('Docker is still using %s. Restart Docker to switch to %s.', root, configuredRoot)
 		: t('Docker is still using the previous registry mirrors. Restart Docker to apply the change.'));
 	const fieldError = id => errors.filter(e => e.field === id).map(e => e.text).join(' ');
 
@@ -63,13 +86,18 @@
 		errors = validateSettings(draft).map(x => ({ text: t(x.message), field: `docker-${x.field}` }));
 		if (errors.length) { await tick(); errorSummary?.focus(); return; }
 		const next = $state.snapshot(draft), current = $state.snapshot(base);
+		/* 保存后会重读配置（moving 随之变为 false），先记下这次是否要迁移 */
+		const move = moving && migrate && hasData && !!onmigrate;
 		const ok = await saveFlow(() => svc.saveSettings(current, next), {
 			busy: on => { busy = on; },
 			fail: async err => { errors = [{ text: errorText(err) }]; await tick(); errorSummary?.focus(); },
 			done: load,
 			alive: () => alive,
 		});
-		if (ok && alive) await recheck();
+		if (!ok || !alive) return;
+		/* 换了数据目录且勾选迁移：交给迁移任务（会重启 Docker），不再提示手动重启 */
+		if (move) { onmigrate(root); return; }
+		await recheck();
 	}
 	/* 应用后 dockerd 由 procd 异步 reload：重读运行值，几秒内仍不一致才提示重启 */
 	let checking = $state(false);
@@ -135,18 +163,34 @@
 					<Input id="docker-data-root" name="dockerDataRoot" bind:value={draft.dataRoot} disabled={locked} placeholder={DEFAULT_DATA_ROOT} spellcheck="false" autocomplete="off"
 						aria-describedby="docker-data-root-description" aria-invalid={!!fieldError('docker-data-root')} />
 				</SettingRow>
-				{#if disks?.usable.length}
-					<div class="disks" data-docker-disks>
+				{#if disks && (disks.usable.length || disks.unmounted.length)}
+					<ul class="disks" data-docker-disks>
 						{#each disks.usable as d (d.mount)}
-							<Button size="compact" disabled={locked || draftDisk?.mount === d.mount} onclick={() => useDisk(d)} data-disk={d.mount}>{t('Use %s (%s free)', d.title, size(d.free))}</Button>
+							<li>
+								<span class="disk"><strong>{d.title}</strong><span class="muted">{d.device} · {d.fstype} · {t('%s free of %s', size(d.free), size(d.size))} · {d.mount}</span></span>
+								<Button size="compact" disabled={locked || draftDisk?.mount === d.mount} onclick={() => useDisk(d)} data-disk={d.mount}>{draftDisk?.mount === d.mount ? t('Selected') : t('Use')}</Button>
+							</li>
 						{/each}
-					</div>
-					{#if !draftDisk}<Callout tone="warning" message={t('The data directory is on the router’s internal storage, which is small. Use one of the disks above.')} />{/if}
-				{:else if disks?.unsupported.length}
+						{#each disks.unmounted as d (d.device)}
+							<li>
+								<span class="disk"><strong>{d.title}</strong><span class="muted">{d.device} · {d.fstype} · {size(d.size)} · {t('Not mounted')}</span></span>
+								<Button size="compact" disabled={locked || !!mounting} onclick={() => mountAndUse(d)} data-disk-mount={d.device}>{mounting === d.device ? t('Mounting…') : t('Mount and use')}</Button>
+							</li>
+						{/each}
+					</ul>
+					{#if mountError}<Feedback tone="error" message={mountError} compact />{/if}
+					{#if !draftDisk}<Callout tone="warning" message={t('The data directory is not on any disk above. On the router’s internal storage, space is small and containers usually cannot be created at all. Use one of the disks above.')} />{/if}
+				{/if}
+				{#if disks?.unsupported.length}
 					<p class="muted" data-docker-disks="unsupported">{t('Disks formatted as %s cannot hold Docker data. Format one as ext4 on the Storage page.', [...new Set(disks.unsupported.map(d => d.fstype))].join(', '))} <a href="#/storage">{t('Open Storage')}</a></p>
 				{/if}
-				{#if rootChanged && draft.dataRoot.trim() !== base.dataRoot}
-					<Callout tone="warning" message={t('After the change and a restart of Docker, existing images and containers are no longer shown. They stay in %s and come back if you switch back.', root)} />
+				{#if moving}
+					{#if hasData}<Checkbox bind:checked={migrate} disabled={locked} data-migrate>{t('Move the containers and volumes to the new directory (images are downloaded again)')}</Checkbox>{/if}
+					{#if hasData && migrate}
+						<p class="muted" data-migrate-note>{t('After saving, Docker restarts with the new directory, the containers are recreated there with the same settings and volume data is copied. Containers created from an image ID cannot be moved. The old directory is kept.')}</p>
+					{:else}
+						<Callout tone="warning" message={t('After the change and a restart of Docker, existing images and containers are no longer shown. They stay in %s and come back if you switch back.', root)} />
+					{/if}
 				{/if}
 			</SettingsGroup>
 			<FormActions busy={locked} disabled={!dirty} oncancel={reset} description={t('Changes take effect when you save. If the device becomes unreachable, they roll back automatically.')} />
@@ -157,6 +201,9 @@
 <style lang="less">
 	.form { display: flex; flex-direction: column; gap: var(--sp-5); }
 	.mirrors { display: flex; flex-direction: column; gap: var(--sp-2); }
-	.presets, .disks { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); }
+	.presets { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); }
+	.disks { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: var(--sp-2); }
+	.disks li { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); padding: var(--sp-2) var(--sp-3); border: 1px solid var(--border-color); border-radius: var(--radius); }
+	.disk { display: flex; flex-direction: column; min-width: 0; overflow-wrap: anywhere; }
 	.muted { margin: 0; color: var(--text-muted); font-size: var(--fs-xs); }
 </style>

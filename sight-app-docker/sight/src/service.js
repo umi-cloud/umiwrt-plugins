@@ -42,11 +42,18 @@ export function formatPorts(ports) {
 }
 
 export const PROJECT_LABEL = 'com.docker.compose.project';
+/** 纯函数：列表的状态文字里的健康检查结果 → 'healthy' | 'unhealthy' | 'starting' | ''（没有健康检查） */
+export function healthOf(status) {
+	const m = /\((healthy|unhealthy|health: starting)\)/.exec(status || '');
+	return m ? (m[1] === 'health: starting' ? 'starting' : m[1]) : '';
+}
+/** 纯函数：需要提醒的异常：反复重启、健康检查失败 */
+export const troubleOf = c => c.state === 'restarting' ? 'restarting' : c.health === 'unhealthy' ? 'unhealthy' : '';
 /** 纯函数：列表数据整形；镜像的使用数按容器的 ImageID 统计（list 接口的 Containers 字段常为 -1） */
 export function shape(containers, images) {
 	const list = (containers || []).map(c => ({
 		id: c.Id, name: (c.Names?.[0] || c.Id.slice(0, 12)).replace(/^\//, ''), image: c.Image, imageId: c.ImageID, ref: imageRefOf(c.Image),
-		state: c.State, status: c.Status, ports: formatPorts(c.Ports), publish: c.Ports || [], created: c.Created, command: c.Command || '',
+		state: c.State, status: c.Status, health: healthOf(c.Status), ports: formatPorts(c.Ports), publish: c.Ports || [], created: c.Created, command: c.Command || '',
 		project: c.Labels?.[PROJECT_LABEL] || '', service: c.Labels?.['com.docker.compose.service'] || '',
 		workingDir: c.Labels?.['com.docker.compose.project.working_dir'] || '',
 		networks: Object.keys(c.NetworkSettings?.Networks || {}), volumes: (c.Mounts || []).filter(m => m.Type === 'volume' && m.Name).map(m => m.Name),
@@ -209,12 +216,48 @@ export function filterLogs(lines, query, withTime, formatTime) {
 	return q ? lines.filter(l => (withTime && l.time != null ? `${formatTime(l.time)} ${l.text}` : l.text).toLowerCase().includes(q)) : lines;
 }
 
-/** 纯函数：新建网络校验 → [{ message, field }] */
+const ipNum = a => a.split('.').reduce((v, x) => v * 256 + +x, 0);
+const ipStr = n => [24, 16, 8, 0].map(s => Math.floor(n / 2 ** s) % 256).join('.');
+
+/**
+ * 纯函数：macvlan 网络给容器分配地址的建议范围（32 个地址），避开 DHCP 地址池与路由器自己的地址：
+ * 优先取地址池之前最近的一段，否则取之后的一段；找不到为 ''。lan：{ address, prefix }；dhcp：{ start, limit }（相对网段起点）
+ */
+export function suggestMacvlanRange(lan, dhcp) {
+	if (!isIPv4(lan?.address) || !(lan.prefix >= 8 && lan.prefix <= 27)) return '';
+	const size = 2 ** (32 - lan.prefix), base = Math.floor(ipNum(lan.address) / size) * size, router = ipNum(lan.address);
+	const poolStart = base + (+dhcp?.start || 100), poolEnd = poolStart + (+dhcp?.limit || 150) - 1;
+	const ok = b => b > base && b + 31 < base + size - 1 && (b + 31 < poolStart || b > poolEnd) && !(router >= b && router <= b + 31);
+	for (let b = Math.floor((poolStart - 32) / 32) * 32; b > base; b -= 32) if (ok(b)) return `${ipStr(b)}/27`;
+	for (let b = Math.ceil((poolEnd + 1) / 32) * 32; b + 31 < base + size; b += 32) if (ok(b)) return `${ipStr(b)}/27`;
+	return '';
+}
+
+/** 纯函数：network.interface dump + dhcp 配置 → LAN 口信息 { device, address, prefix, subnet, range }；LAN 口没起来为 null */
+export function lanOf(dump, dhcp) {
+	const lan = (dump?.interface || []).find(i => i.interface === 'lan' && i.up);
+	const a = lan?.['ipv4-address']?.[0];
+	if (!lan || !a) return null;
+	const size = 2 ** (32 - a.mask), base = Math.floor(ipNum(a.address) / size) * size;
+	const sec = Object.values(dhcp || {}).find(s => s['.type'] === 'dhcp' && s.interface === 'lan');
+	const pool = sec && sec.ignore !== '1' ? { start: sec.start, limit: sec.limit } : { start: 0, limit: 0 };
+	return { device: lan.l3_device || lan.device || '', address: a.address, prefix: a.mask, subnet: `${ipStr(base)}/${a.mask}`, range: suggestMacvlanRange({ address: a.address, prefix: a.mask }, pool) };
+}
+
+const PARENT_RE = /^[A-Za-z0-9][A-Za-z0-9._@-]{0,14}$/;
+/** 纯函数：新建网络校验 → [{ message, field }]；macvlan 必须有父接口、子网与网关，分配范围须在子网内 */
 export function validateNetwork(form, names = []) {
 	const errors = [];
 	const name = form.name.trim(), subnet = form.subnet.trim(), gateway = form.gateway.trim();
 	if (!NAME_RE.test(name)) errors.push({ message: 'Names use letters, digits, dots, dashes and underscores, at least 2 characters', field: 'name' });
 	else if (names.includes(name)) errors.push({ message: 'A network with this name already exists', field: 'name' });
+	if (form.driver === 'macvlan') {
+		const parent = String(form.parent || '').trim(), range = String(form.range || '').trim();
+		if (!PARENT_RE.test(parent)) errors.push({ message: 'Enter the router interface to attach to, for example br-lan', field: 'parent' });
+		if (!subnet || !gateway) errors.push({ message: 'A LAN network needs the LAN subnet and the router address as gateway', field: subnet ? 'gateway' : 'subnet' });
+		if (range && !(isCidr(range) && subnet && isCidr(subnet) && inSubnet(range.split('/')[0], subnet) && +range.split('/')[1] >= +subnet.split('/')[1]))
+			errors.push({ message: 'The address range must be a part of the subnet, for example 192.168.1.64/27', field: 'range' });
+	}
 	if (subnet && !(subnet.includes('/') && (isCidr(subnet) || isCidr(subnet, 6)))) errors.push({ message: 'Enter the subnet as an address with a prefix length, for example 172.30.0.0/16', field: 'subnet' });
 	if (gateway && !(isIPv4(gateway) || isIPv6(gateway))) errors.push({ message: 'Enter a valid IP address', field: 'gateway' });
 	else if (gateway && !subnet) errors.push({ message: 'Set the subnet together with the gateway', field: 'gateway' });
@@ -223,10 +266,12 @@ export function validateNetwork(form, names = []) {
 
 /** 纯函数：新建网络表单 → docker.network.create 的 body */
 export function buildNetwork(form) {
-	const body = { Name: form.name.trim(), Driver: 'bridge', CheckDuplicate: true };
-	const subnet = form.subnet.trim(), gateway = form.gateway.trim();
-	if (subnet) body.IPAM = { Driver: 'default', Config: [{ Subnet: subnet, ...(gateway ? { Gateway: gateway } : {}) }] };
-	if (form.internal) body.Internal = true;
+	const macvlan = form.driver === 'macvlan';
+	const body = { Name: form.name.trim(), Driver: macvlan ? 'macvlan' : 'bridge', CheckDuplicate: true };
+	const subnet = form.subnet.trim(), gateway = form.gateway.trim(), range = String(form.range || '').trim();
+	if (subnet) body.IPAM = { Driver: 'default', Config: [{ Subnet: subnet, ...(gateway ? { Gateway: gateway } : {}), ...(macvlan && range ? { IPRange: range } : {}) }] };
+	if (macvlan) body.Options = { parent: String(form.parent).trim() };
+	if (form.internal && !macvlan) body.Internal = true;
 	return body;
 }
 
@@ -264,15 +309,65 @@ export function splitCommand(text) {
 }
 
 const PATH_RE = /^\/[^:]*$/;
+/* 命名卷：Docker 的卷名规则；64 位十六进制为匿名卷，不由表单管理 */
+export const VOLUME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_.-]+$/;
+export const isAnonymousVolume = name => /^[a-f0-9]{64}$/.test(name || '');
+const CAP_RE = /^[A-Z][A-Z_]*$/;
+/** 纯函数：权限名统一成大写、去掉 CAP_ 前缀 */
+export const normalizeCap = s => String(s || '').trim().toUpperCase().replace(/^CAP_/, '');
 const ENV_RE = /^[^=\s]+=/;
 const port = v => /^\d+$/.test(String(v).trim()) && +v >= 1 && +v <= 65535;
 /* 端口/目录行：两栏都空的行视为未填，忽略 */
 const filled = row => String(row.host ?? '').trim() !== '' || String(row.container ?? '').trim() !== '';
 
+/* 日志上限：单个文件大小:文件数（json-file 驱动的 max-size / max-file）；total 为大约占用的 MB */
+export const LOG_LIMITS = [{ value: '10m:3', total: 30 }, { value: '20m:5', total: 100 }, { value: '50m:4', total: 200 }];
+export const DEFAULT_LOG = '10m:3';
+/** 纯函数：HostConfig.LogConfig → 表单取值：选项之一、''（json-file 不限制或用守护进程缺省）、'custom'（其它驱动或其它数值，表单不改） */
+export function logOf(cfg) {
+	const type = cfg?.Type || '', c = cfg?.Config || {};
+	if (type && type !== 'json-file') return 'custom';
+	if (!c['max-size']) return '';
+	const key = `${c['max-size']}:${c['max-file'] || '1'}`;
+	return LOG_LIMITS.some(o => o.value === key) ? key : 'custom';
+}
+/** 纯函数：表单取值 → HostConfig.LogConfig */
+export function logConfig(key) {
+	const [size, files] = String(key || '').split(':');
+	return { Type: 'json-file', Config: size ? { 'max-size': size, 'max-file': files || '1' } : {} };
+}
+
+/** 纯函数：Docker 数据目录 → 应用数据的建议存放处（同一块盘上的 appdata，如 /opt/docker → /opt/appdata） */
+export function appBaseOf(dataRoot) {
+	const dir = String(dataRoot || DEFAULT_DATA_ROOT).replace(/\/+$/, '');
+	const parent = dir.slice(0, dir.lastIndexOf('/')) || '';
+	return `${parent}/appdata`;
+}
+
+/**
+ * 纯函数：镜像自带的 EXPOSE 端口与 VOLUME 路径 → 建议的端口行与目录行（表单里已有的跳过）。
+ * 设备端口：1024 以下的加 8000（80 → 8080），避开路由器自己的服务；目录放在 <appBase>/<容器名或镜像名><路径>。
+ */
+export function imageHints(config, form, appBase) {
+	const ports = [], mounts = [];
+	for (const key of Object.keys(config?.ExposedPorts || {})) {
+		const [port, proto = 'tcp'] = key.split('/');
+		if (!/^\d+$/.test(port) || !['tcp', 'udp'].includes(proto) || form.ports.some(p => String(p.container).trim() === port && p.proto === proto)) continue;
+		ports.push({ host: String(+port < 1024 ? +port + 8000 : +port), container: port, proto, ip: '' });
+	}
+	const image = createImage(form);
+	const slug = form.name.trim() || image.split('/').pop().replace(/[:@].*$/, '') || 'app';
+	for (const path of Object.keys(config?.Volumes || {})) {
+		if (!path.startsWith('/') || path.includes(':') || form.mounts.some(m => m.container.trim() === path)) continue;
+		mounts.push({ host: `${appBase}/${slug}${path}`, container: path, readonly: false });
+	}
+	return { ports, mounts };
+}
+
 /** 新建容器表单的初值 */
 export function emptyCreate() {
 	return { source: 'local', image: '', pullRef: '', name: '', ports: [], mounts: [], env: [], restart: 'unless-stopped', network: 'bridge', ip: '', command: '', privileged: false,
-		hostname: '', memory: '', cpus: '', devices: [], start: true };
+		hostname: '', memory: '', cpus: '', devices: [], caps: [], log: DEFAULT_LOG, start: true };
 }
 
 /** 纯函数：表单选择的镜像引用 */
@@ -294,9 +389,8 @@ export const ownNetwork = network => !/^(host|none|container:)/.test(network || 
 export function inSubnet(ip, cidr) {
 	const [net, len] = String(cidr).split('/');
 	if (!isIPv4(ip) || !isIPv4(net) || !(+len >= 0 && +len <= 32)) return false;
-	const n = a => a.split('.').reduce((v, x) => v * 256 + +x, 0);
 	const mask = +len === 0 ? 0 : (0xffffffff << (32 - len)) >>> 0;
-	return ((n(ip) & mask) >>> 0) === ((n(net) & mask) >>> 0);
+	return ((ipNum(ip) & mask) >>> 0) === ((ipNum(net) & mask) >>> 0);
 }
 
 /* 内存上限的最小值（MB，Docker 不接受更小的） */
@@ -326,8 +420,8 @@ export function validateCreate(form, names = [], { subnets = [], cpus = null } =
 			}
 		}
 	}
-	if (form.mounts.filter(filled).some(m => !PATH_RE.test(m.host.trim()) || !PATH_RE.test(m.container.trim())))
-		errors.push({ message: 'Folder paths must start with / and cannot contain a colon', field: 'mounts' });
+	if (form.mounts.filter(filled).some(m => { const h = m.host.trim(); return !(PATH_RE.test(h) || (VOLUME_RE.test(h) && !isAnonymousVolume(h))) || !PATH_RE.test(m.container.trim()); }))
+		errors.push({ message: 'Use a folder on the device (starting with /) or a volume name; paths in the container start with /, and neither can contain a colon', field: 'mounts' });
 	if (form.env.some(e => !ENV_RE.test(e))) errors.push({ message: 'Environment variables look like NAME=value', field: 'env' });
 	const ip = String(form.ip || '').trim();
 	if (ip && isCustomNetwork(form.network)) {
@@ -340,6 +434,7 @@ export function validateCreate(form, names = [], { subnets = [], cpus = null } =
 	if (memory && !(/^\d+$/.test(memory) && +memory >= MIN_MEMORY)) errors.push({ message: 'Enter the memory limit in MB, at least %d', args: [MIN_MEMORY], field: 'memory' });
 	const cpu = String(form.cpus ?? '').trim();
 	if (cpu && !(/^\d+(\.\d{1,2})?$/.test(cpu) && +cpu > 0 && (!cpus || +cpu <= cpus))) errors.push(cpus ? { message: 'Enter a number of CPU cores from 0.01 to %d', args: [cpus], field: 'cpus' } : { message: 'Enter a number of CPU cores, for example 1.5', field: 'cpus' });
+	if ((form.caps || []).some(c => !CAP_RE.test(normalizeCap(c)))) errors.push({ message: 'Permissions are names such as NET_ADMIN', field: 'caps' });
 	if ((form.devices || []).some(d => !DEVICE_RE.test(String(d).trim()))) errors.push({ message: 'Devices are paths under /dev, for example /dev/dri or /dev/ttyUSB0:/dev/ttyACM0', field: 'devices' });
 	if (splitCommand(form.command) === null) errors.push({ message: 'The command has an unmatched quote', field: 'command' });
 	return errors;
@@ -348,15 +443,12 @@ export function validateCreate(form, names = [], { subnets = [], cpus = null } =
 /* 自定义网络（不是内置的 bridge/host/none，也不共用其他容器的网络）才能指定固定地址 */
 export const isCustomNetwork = network => !!network && !BUILTIN_NETWORKS.includes(network) && !network.startsWith('container:');
 
-/** 纯函数：资源限制、主机名、设备的表单值 → 写入 create 参数（host 为 HostConfig）；空值即不限制 */
-export function applyLimits(body, host, form) {
-	const memory = String(form.memory ?? '').trim(), cpus = String(form.cpus ?? '').trim();
-	host.Memory = memory ? +memory * 1048576 : 0;
-	host.NanoCpus = cpus ? Math.round(+cpus * 1e9) : 0;
-	host.Devices = (form.devices || []).map(d => String(d).trim()).filter(Boolean).map(parseDevice);
-	const hostname = String(form.hostname || '').trim();
-	if (hostname && ownNetwork(form.network)) body.Hostname = hostname; else delete body.Hostname;
-}
+/* 纯函数：表单的资源限制、设备与权限 → create 参数里的写法（新建与编辑共用）；空值为 0 / [] 即不限制 */
+const trimmed = v => String(v ?? '').trim();
+export const memoryBytes = v => trimmed(v) ? +trimmed(v) * 1048576 : 0;
+export const nanoCpus = v => trimmed(v) ? Math.round(+trimmed(v) * 1e9) : 0;
+export const deviceList = list => (list || []).map(trimmed).filter(Boolean);
+export const capList = list => [...new Set((list || []).map(normalizeCap).filter(Boolean))];
 
 /** 纯函数：表单（已校验）→ docker.container.create 的参数；空行忽略，host 网络不发布端口 */
 export function buildCreate(form) {
@@ -372,16 +464,20 @@ export function buildCreate(form) {
 		for (const p of ports) {
 			const key = `${+p.container}/${p.proto}`;
 			body.ExposedPorts[key] = {};
-			(host.PortBindings[key] ||= []).push({ HostPort: String(+p.host) });
+			(host.PortBindings[key] ||= []).push({ HostIp: p.ip || '', HostPort: String(+p.host) });
 		}
 	}
 	const mounts = form.mounts.filter(filled);
 	if (mounts.length) host.Binds = mounts.map(m => `${m.host.trim()}:${m.container.trim()}${m.readonly ? ':ro' : ''}`);
 	if (form.privileged) host.Privileged = true;
-	applyLimits(body, host, form);
-	if (!host.Memory) delete host.Memory;
-	if (!host.NanoCpus) delete host.NanoCpus;
-	if (!host.Devices.length) delete host.Devices;
+	const memory = memoryBytes(form.memory), cpus = nanoCpus(form.cpus), devices = deviceList(form.devices), caps = capList(form.caps);
+	if (memory) host.Memory = memory;
+	if (cpus) host.NanoCpus = cpus;
+	if (devices.length) host.Devices = devices.map(parseDevice);
+	if (caps.length) host.CapAdd = caps;
+	if (form.log && form.log !== 'custom') host.LogConfig = logConfig(form.log);
+	const hostname = trimmed(form.hostname);
+	if (hostname && ownNetwork(form.network)) body.Hostname = hostname;
 	const ip = String(form.ip || '').trim();
 	if (ip && isCustomNetwork(form.network)) body.NetworkingConfig = { EndpointsConfig: { [form.network]: { IPAMConfig: { IPv4Address: ip } } } };
 	const name = form.name.trim();
@@ -406,10 +502,15 @@ export function memoryUsage(sample) {
 	return { used: cache < m.usage ? m.usage - cache : m.usage, limit: m.limit || null };
 }
 
-/** 纯函数：inspect → 详情里用到的配置 */
+/** 纯函数：inspect → 详情里用到的配置与运行状况 */
 export function detailOf(inspect) {
-	const host = inspect?.HostConfig || {};
+	const host = inspect?.HostConfig || {}, state = inspect?.State || {};
+	const healthLog = state.Health?.Log || [];
 	return {
+		addresses: Object.entries(inspect?.NetworkSettings?.Networks || {}).map(([network, ep]) => ({ network, ip: ep?.IPAddress || '', ip6: ep?.GlobalIPv6Address || '' })).filter(a => a.ip || a.ip6),
+		env: inspect?.Config?.Env || [],
+		health: state.Health?.Status || '', healthOutput: String(healthLog[healthLog.length - 1]?.Output || '').trim(),
+		restartCount: inspect?.RestartCount || 0, exitCode: state.ExitCode ?? null, oom: !!state.OOMKilled, error: state.Error || '',
 		imageRef: inspect?.Config?.Image || '',
 		restart: host.RestartPolicy?.Name || 'no',
 		network: host.NetworkMode || '',
@@ -519,16 +620,57 @@ const DIR_RE = /^\/[^\s"'\\]+$/;
 /* Docker 的 overlay2 需要支持 d_type 的 Linux 文件系统；vfat、exFAT、NTFS 放不了数据 */
 const DOCKER_FS = ['ext4', 'xfs', 'btrfs', 'f2fs'];
 
-/** 纯函数：宿主 sight.storage.list → 可放 Docker 数据的盘（已挂载、非系统卷）与放不了的盘 */
+/**
+ * 纯函数：宿主 sight.storage.list → 可放 Docker 数据的盘：已挂载的（usable）、文件系统合适但未挂载的（unmounted，可挂载后使用），
+ * 以及文件系统不合适的（unsupported）；系统卷不列。
+ */
 export function diskChoices(storage) {
-	const usable = [], unsupported = [];
+	const usable = [], unmounted = [], unsupported = [];
 	for (const d of storage?.disks || []) for (const v of d.volumes || []) {
-		if (v.system || !v.mounts?.length || !v.usage) continue;
-		const item = { mount: v.mounts[0], title: v.label || v.partname || v.name, fstype: v.fstype, free: v.usage.avail, size: v.usage.size };
+		if (v.system || !v.fstype || v.fstype === 'swap') continue;
+		const title = v.label || v.partname || v.name;
+		if (!v.mounts?.length) {
+			if (DOCKER_FS.includes(v.fstype)) unmounted.push({ device: v.device, name: v.name, title, fstype: v.fstype, size: v.size });
+			continue;
+		}
+		if (!v.usage) continue;
+		const item = { mount: v.mounts[0], device: v.device, title, fstype: v.fstype, free: v.usage.avail, size: v.usage.size };
 		(DOCKER_FS.includes(v.fstype) ? usable : unsupported).push(item);
 	}
 	usable.sort((a, b) => b.free - a.free);
-	return { usable, unsupported };
+	unmounted.sort((a, b) => b.size - a.size);
+	return { usable, unmounted, unsupported };
+}
+
+/** 纯函数：给未挂载的盘取挂载点 /mnt/<卷标或分区名>（只留安全字符）；与已有挂载点重名时用设备名 */
+export function mountTargetFor(disk, used = []) {
+	const slug = s => String(s || '').replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^[-.]+|-+$/g, '').slice(0, 32);
+	const first = `/mnt/${slug(disk.title) || slug(disk.name) || 'data'}`;
+	return used.includes(first) ? `/mnt/${slug(disk.name) || 'data'}` : first;
+}
+
+/* 放不了 overlay 存储的文件系统：overlay 不能叠在 overlay 上（OpenWrt 根目录即 overlay），FAT/exFAT/NTFS 不支持所需特性 */
+const OVERLAY_UNSUPPORTED = ['overlay', 'aufs', 'vfat', 'msdos', 'exfat', 'ntfs', 'ntfs3', 'fuseblk', 'squashfs', 'jffs2'];
+/**
+ * 纯函数：root_status → 数据目录的问题：'shadowed'（运行中被新挂载的盘盖住，需重启）、'unsupported'（文件系统放不了，容器建不起来）、
+ * 'temporary'（在内存里，重启路由器后丢失）或 ''
+ */
+export function rootProblem(s) {
+	if (!s?.root) return '';
+	if (s.shadowed) return 'shadowed';
+	if (/overlay/.test(s.driver || '') && OVERLAY_UNSUPPORTED.includes(s.fstype)) return 'unsupported';
+	if (s.fstype === 'tmpfs') return 'temporary';
+	return '';
+}
+
+/** 纯函数：网络列表的原始数据 → 迁移时新建用的参数；内置网络与 Compose 项目的网络（由 compose 重建）不迁 */
+export function migrationNetworks(networks) {
+	return (networks || []).filter(n => !BUILTIN_NETWORKS.includes(n.Name) && !n.Labels?.[PROJECT_LABEL]).map(n => ({
+		Name: n.Name, Driver: n.Driver || 'bridge', CheckDuplicate: true,
+		...(n.Options && Object.keys(n.Options).length ? { Options: n.Options } : {}),
+		...(n.IPAM?.Config?.length ? { IPAM: { Driver: n.IPAM.Driver || 'default', Config: n.IPAM.Config.map(c => Object.fromEntries(['Subnet', 'Gateway', 'IPRange'].filter(k => c[k]).map(k => [k, c[k]]))) } } : {}),
+		...(n.Internal ? { Internal: true } : {}), ...(n.Labels && Object.keys(n.Labels).length ? { Labels: n.Labels } : {}),
+	}));
 }
 
 /** 纯函数：目录落在哪块盘上（取最长的挂载点前缀）；不在任何数据盘上返回 null */
@@ -597,7 +739,7 @@ export function createDocker(client, uci) {
 			if (!version) return null;
 			if (version.code >= 300) return { reachable: false, error: version.body?.message || '' };
 			const soft = p => p.catch(e => ({ error: e?.message || String(e) }));
-			const [info, containers, images, df, networks, volumes, compose, checks] = await Promise.all([
+			const [info, containers, images, df, networks, volumes, compose, checks, rootStatus] = await Promise.all([
 				call('sight.docker', 'info'),
 				call('sight.docker.container', 'list', { query: { all: true } }),
 				call('sight.docker.image', 'list', {}),
@@ -606,6 +748,7 @@ export function createDocker(client, uci) {
 				soft(call('sight.docker.volume', 'list', { query: {} })),
 				soft(sight('compose_list')),
 				sight('check_list').then(r => r.images || {}).catch(() => ({})),
+				sight('root_status').catch(() => null),
 			]);
 			const shaped = shape(containers, images);
 			await resolveRefs(shaped.containers);
@@ -615,7 +758,7 @@ export function createDocker(client, uci) {
 				info: { version: info.ServerVersion || version.body?.Version || '', running: info.ContainersRunning ?? 0, total: info.Containers ?? 0, cpus: info.NCPU ?? null, memory: info.MemTotal ?? null, root: info.DockerRootDir || '', mirrors: info.RegistryConfig?.Mirrors || [] },
 				disk: df?.LayersSize ?? null,
 				storage: storageOf(df, shaped.images, shaped.containers, vols),
-				checks,
+				checks, rootStatus,
 				...shaped,
 				networks: networks.error ? networks : networksOf(networks, shaped.containers),
 				volumes: vols,
@@ -686,6 +829,8 @@ export function createDocker(client, uci) {
 			if (!canUpdate(inspect.Config?.Image)) throw new Error('This container was created from an image ID, so there is no newer version to look for');
 			return (await sight('recreate_start', { id, mode: 'update', name: '', body: base.body })).task;
 		},
+		/** 本机镜像的 Config（取 EXPOSE 端口与 VOLUME 路径）；读不到为 null */
+		async imageConfig(ref) { return (await call('sight.docker.image', 'inspect', { id: ref }).catch(() => null))?.Config || null; },
 		/** 在 Docker Hub 搜索镜像 → [{ name, description, stars, official }]（已排序） */
 		async search(term) {
 			if (!isSearchTerm(term)) throw new Error('Search with letters, digits, dots, dashes and slashes');
@@ -699,6 +844,18 @@ export function createDocker(client, uci) {
 			for (const id of ids) items.push({ id, body: (await this.recreateBase(id)).base.body });
 			return (await sight('update_start', { items })).task;
 		},
+		/** 各容器的日志配置与日志文件大小 → [{ id, name, project, log, size }] */
+		async logsUsage() { return (await sight('logs_usage')).containers || []; },
+		/** 给这些容器设日志上限：按原配置重建（批量编辑任务） */
+		async limitLogs(ids, key = DEFAULT_LOG) {
+			const items = [];
+			for (const id of ids) {
+				const { body } = (await this.recreateBase(id)).base;
+				body.HostConfig = { ...body.HostConfig, LogConfig: logConfig(key) };
+				items.push({ id, body });
+			}
+			return (await sight('update_start', { items, mode: 'edit' })).task;
+		},
 		/** 用编辑后的表单重建（不拉取，镜像不在本机时设备端先下载） */
 		async edit(id, base, form) {
 			return (await sight('recreate_start', { id, mode: 'edit', name: form.name.trim(), body: buildEdit(base, form) })).task;
@@ -706,6 +863,11 @@ export function createDocker(client, uci) {
 
 		/* ---- 网络与卷 ---- */
 		async createNetwork(form) { await call('sight.docker.network', 'create', { body: buildNetwork(form) }); },
+		/** LAN 口信息（macvlan 的父接口、子网、网关与建议范围）；读不到为 null */
+		async lan() {
+			const [dump, dhcp] = await Promise.all([client.call('network.interface', 'dump').catch(() => null), uci.load('dhcp').catch(() => null)]);
+			return lanOf(dump, dhcp);
+		},
 		async removeNetwork(id) { await call('sight.docker.network', 'remove', { id }); },
 		async createVolume(name) { await call('sight.docker.volume', 'create', { opts: name ? { Name: name } : {} }); },
 		async removeVolume(name) { await call('sight.docker.volume', 'remove', { id: name, query: {} }); },
@@ -737,6 +899,34 @@ export function createDocker(client, uci) {
 		async timezone() {
 			const sys = await uci.load('system').catch(() => null);
 			return Object.values(sys || {}).find(s => s['.type'] === 'system')?.zonename || '';
+		},
+		/** 用宿主的存储接口挂载一块盘（开机自动挂载，fstab 按 UUID）；返回挂载点 */
+		async mountDisk(disk, used = []) {
+			const target = mountTargetFor(disk, used);
+			await client.call('sight.storage', 'mount', { device: disk.device, target, auto: true });
+			return target;
+		},
+		/**
+		 * 迁移到新数据目录：趁 Docker 仍在旧目录上，整理网络、卷、单独的容器（按重建参数）与本页管理且在运行的 Compose 项目，交给设备端任务。
+		 * 由镜像 ID 创建、无法重新下载的容器不迁，返回在 skipped 里
+		 */
+		async migrate(oldRoot) {
+			const [containers, networks, volumes, compose] = await Promise.all([
+				call('sight.docker.container', 'list', { query: { all: true } }), call('sight.docker.network', 'list', { query: {} }),
+				call('sight.docker.volume', 'list', { query: {} }), sight('compose_list'),
+			]);
+			const items = [], skipped = [];
+			for (const c of shape(containers, []).containers) {
+				if (c.project) continue;
+				const { body } = (await this.recreateBase(c.id)).base;
+				if (!canUpdate(body.Image)) { skipped.push(c.name); continue; }
+				items.push({ name: c.name, running: c.state === 'running' || c.state === 'restarting', body });
+			}
+			const files = new Set((compose.projects || []).map(p => p.name));
+			const projects = [...new Set(shape(containers, []).containers.filter(c => c.project && files.has(c.project) && c.state === 'running').map(c => c.project))];
+			const plan = { old_root: String(oldRoot).replace(/\/+$/, ''), networks: migrationNetworks(networks),
+				volumes: (volumes?.Volumes || []).filter(v => (v.Driver || 'local') === 'local').map(v => ({ name: v.Name, labels: v.Labels || {} })), containers: items, projects };
+			return { task: (await sight('migrate_start', plan)).task, skipped };
 		},
 		/** 宿主的存储信息（sight-ui 0.6.0 起有 sight.storage）；没有时返回 null，页面不显示数据盘建议 */
 		async loadDisks() {

@@ -17,7 +17,7 @@ test('数据盘：只取已挂载的非系统卷，按文件系统分出可用�
 	const r = diskChoices(storage);
 	assert.deepEqual(r.usable.map(d => [d.mount, d.title, d.fstype]), [['/mnt/data', 'data', 'ext4']]);
 	assert.deepEqual(r.unsupported.map(d => [d.mount, d.fstype]), [['/mnt/sda1', 'vfat']]);
-	assert.deepEqual(diskChoices(null), { usable: [], unsupported: [] });
+	assert.deepEqual(diskChoices(null), { usable: [], unmounted: [], unsupported: [] });
 });
 
 test('数据目录落在哪块盘：取最长挂载点前缀；默认目录在内部存储上', () => {

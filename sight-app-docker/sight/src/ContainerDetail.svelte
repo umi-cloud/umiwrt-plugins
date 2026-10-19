@@ -1,6 +1,6 @@
 <script>
 	import { onDestroy } from 'svelte';
-	import { t, errorText, createPoller, useEditor, fmtBytes, Badge, Button, Icon, Select, SettingRow, FormSection, DescriptionList, Feedback } from '@sight/sdk';
+	import { t, errorText, createPoller, useEditor, fmtBytes, Badge, Button, Callout, Disclosure, Icon, Select, SettingRow, FormSection, DescriptionList, Feedback } from '@sight/sdk';
 	import { cpuPercent, memoryUsage, canUpdate, portLinks, RESTART_POLICIES } from './service.js';
 	import { stateTone, stateLabel, policyLabel, short, date } from './format.js';
 	import Terminal from './Terminal.svelte';
@@ -60,11 +60,26 @@
 		{ label: t('CPU'), value: usage?.cpu == null ? t('Measuring…') : `${usage.cpu.toFixed(1)}%` },
 		{ label: t('Memory'), value: usage ? memoryText(usage.memory) : t('Measuring…') },
 	]);
+	const HEALTH = { healthy: () => t('Healthy'), unhealthy: () => t('Unhealthy'), starting: () => t('Starting') };
+	/* 异常说明：反复重启（附退出码）、内存不足被结束、健康检查失败 */
+	const trouble = $derived.by(() => {
+		if (!config) return '';
+		const parts = [];
+		if (container.state === 'restarting' || (config.restartCount > 0 && container.state !== 'running'))
+			parts.push(t('It has restarted %d times; the last exit code was %d.', config.restartCount, config.exitCode ?? -1));
+		if (config.oom) parts.push(t('It was stopped because it ran out of memory. Raise or remove the memory limit.'));
+		if (config.health === 'unhealthy') parts.push(config.healthOutput ? t('The health check fails: %s', config.healthOutput.slice(0, 200)) : t('The health check fails.'));
+		if (config.error) parts.push(config.error);
+		return parts.join(' ');
+	});
 	const items = $derived([
 		{ label: t('Image'), value: container.image, mono: true },
 		{ label: t('Status'), value: container.status },
+		...(config?.health ? [{ label: t('Health'), value: HEALTH[config.health]?.() || config.health }] : []),
 		{ label: t('Ports'), value: container.ports.join(', ') || t('None published'), mono: !!container.ports.length },
 		{ label: t('Network'), value: config?.network || '-' },
+		...(config?.addresses?.length ? [{ label: t('IP address'), value: config.addresses.map(a => [a.ip, a.ip6].filter(Boolean).join(' / ') + (config.addresses.length > 1 ? ` (${a.network})` : '')).join(', '), mono: true }] : []),
+		...(config?.restartCount ? [{ label: t('Restarts'), value: String(config.restartCount) }] : []),
 		{ label: t('Created'), value: date(container.created) },
 		{ label: 'ID', value: short(container.id), mono: true },
 		{ label: t('Command'), value: container.command, mono: true, span: 2 },
@@ -88,6 +103,7 @@
 			<Button variant="danger" disabled={busyAll} onclick={() => onrequest('remove')}>{t('Delete')}</Button>
 		</span>
 	</div>
+	{#if trouble}<Callout tone="danger" message={trouble} data-container-trouble />{/if}
 	{#if container.project}<p class="muted">{t('Part of the Compose project %s. Change it by editing the project file.', container.project)}</p>{/if}
 	{#if links.length}
 		<div class="links" data-links>
@@ -104,7 +120,14 @@
 		</FormSection>
 	{/if}
 
-	<FormSection title={t('Container')}><DescriptionList items={items} /></FormSection>
+	<FormSection title={t('Container')}>
+		<DescriptionList items={items} />
+		{#if config?.env?.length}
+			<Disclosure title={t('Environment variables (%d)', config.env.length)}>
+				<ul class="env" data-env>{#each config.env as e}<li class="mono">{e}</li>{/each}</ul>
+			</Disclosure>
+		{/if}
+	</FormSection>
 
 	{#if running}
 		<FormSection title={t('Terminal')} description={t('Opens a shell inside the container in a new tab. Only reachable from the LAN; the session ends when the tab is closed.')}>
@@ -149,6 +172,7 @@
 	.detail-actions, .badges { display: flex; gap: var(--sp-2); flex-wrap: wrap; }
 	.mounts { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: var(--sp-2); font-size: var(--fs-sm); overflow-wrap: anywhere; }
 	.links { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
+	.env { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: var(--sp-1); overflow-wrap: anywhere; }
 	.muted { margin: 0; color: var(--text-muted); font-size: var(--fs-sm); }
 	.mono { font-family: var(--font-family-monospace); font-size: var(--fs-xs); }
 </style>

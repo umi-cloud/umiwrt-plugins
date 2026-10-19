@@ -1,6 +1,6 @@
 <script>
 	import { onDestroy, tick } from 'svelte';
-	import { t, errorText, useEditor, requestLeave, fmtBytes, Badge, Button, Card, Checkbox, Dialog, Disclosure, Drawer, ErrorSummary, Feedback, Field, FormActions, Input, Table, Toolbar } from '@sight/sdk';
+	import { t, errorText, useEditor, requestLeave, fmtBytes, Badge, Button, Callout, Card, Checkbox, Dialog, Disclosure, Drawer, ErrorSummary, Feedback, Field, FormActions, Input, RadioGroup, Table, Toolbar } from '@sight/sdk';
 	import { validateNetwork } from './service.js';
 	import { date } from './format.js';
 
@@ -11,7 +11,14 @@
 	let notice = $state(null);
 	let confirm = $state(null);      // { kind: 'network' | 'volume' | 'prune', item }
 	let drawer = $state('');         // network | volume
-	let netForm = $state({ name: '', subnet: '', gateway: '', internal: false });
+	const emptyNet = () => ({ name: '', driver: 'bridge', parent: '', subnet: '', gateway: '', range: '', internal: false });
+	let netForm = $state(emptyNet());
+	/* macvlan：容器直接拿 LAN 口网段里的地址；按 LAN 口预填父接口、子网、网关与避开 DHCP 地址池的分配范围 */
+	let lan = $state(undefined);     // undefined 未读；null 读不到
+	function pickDriver(driver) {
+		if (driver !== 'macvlan' || !lan) return;
+		netForm.parent ||= lan.device; netForm.subnet ||= lan.subnet; netForm.gateway ||= lan.address; netForm.range ||= lan.range;
+	}
 	let volName = $state('');
 	let errors = $state([]);
 	let summary = $state();
@@ -42,7 +49,8 @@
 
 	async function openDrawer(kind) {
 		if (disabled || !await requestLeave() || !alive) return;
-		netForm = { name: '', subnet: '', gateway: '', internal: false }; volName = ''; errors = []; notice = null;
+		netForm = emptyNet(); volName = ''; errors = []; notice = null;
+		if (kind === 'network' && lan === undefined) svc.lan().then(l => { if (alive) { lan = l; pickDriver(netForm.driver); } }).catch(() => { if (alive) lan = null; });
 		drawer = kind;
 	}
 	async function closeDrawer() { if (!await requestLeave() || !alive) return; drawer = ''; }
@@ -77,7 +85,7 @@
 </script>
 
 {#snippet netContent(raw, row, colIndex)}
-	{#if colIndex === 0}<span class="name"><strong>{row.name}</strong>{#if row.builtin} <Badge>{t('Built-in')}</Badge>{/if}{#if row.project} <Badge tone="info">{row.project}</Badge>{/if}{#if row.internal} <Badge>{t('No internet')}</Badge>{/if}</span>
+	{#if colIndex === 0}<span class="name"><strong>{row.name}</strong>{#if row.builtin} <Badge>{t('Built-in')}</Badge>{/if}{#if row.project} <Badge tone="info">{row.project}</Badge>{/if}{#if row.internal} <Badge>{t('No internet')}</Badge>{/if}{#if row.driver === 'macvlan'} <Badge tone="info">{t('LAN addresses')}</Badge>{/if}</span>
 	{:else}{raw.text}{/if}
 {/snippet}
 {#snippet netActions(row)}
@@ -132,17 +140,38 @@
 			<Field id="network-name" label={t('Name')} help={t('Containers on the same network reach each other by container name.')} error={fieldError('network-name')}>
 				<Input id="network-name" bind:value={netForm.name} disabled={!!busy} spellcheck="false" autocomplete="off" aria-describedby="network-name-help" aria-invalid={!!fieldError('network-name')} />
 			</Field>
-			<Disclosure title={t('Advanced')} description={t('Subnet, gateway and internet access')}>
-				<div class="form">
-					<Field id="network-subnet" label={t('Subnet')} help={t('Leave empty to let Docker choose a free one.')} error={fieldError('network-subnet')}>
-						<Input id="network-subnet" bind:value={netForm.subnet} disabled={!!busy} placeholder="172.30.0.0/16" spellcheck="false" aria-describedby="network-subnet-help" />
+			<RadioGroup name="network-driver" label={t('Type')} bind:value={netForm.driver} disabled={!!busy} onchange={pickDriver}
+				options={[{ value: 'bridge', label: t('Private network for containers') }, { value: 'macvlan', label: t('Own addresses on the LAN (macvlan)') }]} />
+			{#if netForm.driver === 'macvlan'}
+				<div class="form" data-macvlan>
+					<Callout tone="warning" message={t('Each container gets its own address on the LAN, reachable by other devices like a separate computer. The router itself cannot reach these containers, so services on the router (such as DNS forwarding) cannot use them.')} />
+					{#if lan === null}<p class="muted">{t('The LAN interface could not be read. Fill in the details below.')}</p>{/if}
+					<Field id="network-parent" label={t('Router interface')} help={t('The LAN interface, usually br-lan.')} error={fieldError('network-parent')}>
+						<Input id="network-parent" bind:value={netForm.parent} disabled={!!busy} placeholder="br-lan" spellcheck="false" autocomplete="off" />
 					</Field>
-					<Field id="network-gateway" label={t('Gateway')} error={fieldError('network-gateway')}>
-						<Input id="network-gateway" bind:value={netForm.gateway} disabled={!!busy} placeholder="172.30.0.1" spellcheck="false" />
+					<Field id="network-subnet" label={t('LAN subnet')} error={fieldError('network-subnet')}>
+						<Input id="network-subnet" bind:value={netForm.subnet} disabled={!!busy} placeholder="192.168.1.0/24" spellcheck="false" />
 					</Field>
-					<Checkbox bind:checked={netForm.internal} disabled={!!busy}>{t('No internet access: containers on this network only reach each other')}</Checkbox>
+					<Field id="network-gateway" label={t('Gateway (router address)')} error={fieldError('network-gateway')}>
+						<Input id="network-gateway" bind:value={netForm.gateway} disabled={!!busy} placeholder="192.168.1.1" spellcheck="false" />
+					</Field>
+					<Field id="network-range" label={t('Addresses for containers')} help={t('Docker assigns addresses only from this range. Keep it outside the DHCP address pool so devices and containers never get the same address.')} error={fieldError('network-range')}>
+						<Input id="network-range" bind:value={netForm.range} disabled={!!busy} placeholder="192.168.1.64/27" spellcheck="false" aria-describedby="network-range-help" />
+					</Field>
 				</div>
-			</Disclosure>
+			{:else}
+				<Disclosure title={t('Advanced')} description={t('Subnet, gateway and internet access')}>
+					<div class="form">
+						<Field id="network-subnet" label={t('Subnet')} help={t('Leave empty to let Docker choose a free one.')} error={fieldError('network-subnet')}>
+							<Input id="network-subnet" bind:value={netForm.subnet} disabled={!!busy} placeholder="172.30.0.0/16" spellcheck="false" aria-describedby="network-subnet-help" />
+						</Field>
+						<Field id="network-gateway" label={t('Gateway')} error={fieldError('network-gateway')}>
+							<Input id="network-gateway" bind:value={netForm.gateway} disabled={!!busy} placeholder="172.30.0.1" spellcheck="false" />
+						</Field>
+						<Checkbox bind:checked={netForm.internal} disabled={!!busy}>{t('No internet access: containers on this network only reach each other')}</Checkbox>
+					</div>
+				</Disclosure>
+			{/if}
 			<FormActions busy={!!busy} oncancel={closeDrawer} saveLabel={t('Create')} />
 		</form>
 	{/if}
@@ -161,6 +190,7 @@
 </Drawer>
 
 <style lang="less">
+	.muted { margin: 0; color: var(--text-muted); font-size: var(--fs-sm); }
 	.stack, .form { display: flex; flex-direction: column; gap: var(--sp-4); }
 	.form { gap: var(--sp-5); }
 	.name { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--sp-1); min-width: 0; overflow-wrap: anywhere; }

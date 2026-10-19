@@ -18,6 +18,9 @@
  *  11. 设置：镜像加速与数据目录写入 uci、经 reload 生效再恢复；未配置加速时一键使用国内镜像；窄屏截图；
  *      宿主有 sight.storage 时挂一块 ext4 的 loop 盘，核对数据盘建议与一键填入（只在有调试容器标记时做）
  *  12. 装包预置国内镜像加速只做一次
+ *  13. 1.7.0：健康检查失败的提醒与详情（IP、环境变量）、数据目录在内存里的提醒；从 docker run 命令新建（默认日志上限）、镜像建议的端口与目录；
+ *      仅本机监听、命名卷、额外权限与 VPN 一键项；macvlan 网络；批量按新配置重建（补日志上限）与存储空间的日志行；
+ *      设置里挂载未挂载的盘并使用；换数据目录并迁移网络、卷数据与容器，再换回
  * 会修改并恢复配置。公共底座取自 sight-ui 工程：
  *   DOCKER_LOCAL=1 SIGHT_UI=/path/to/sight-ui LUCI_URL=http://127.0.0.1:8148 CONTAINER=<专用容器> node sight/scripts/flow-check.mjs
  */
@@ -46,6 +49,9 @@ const shIn = (cmd, input) => execFileSync('docker', ['exec', '-i', CONTAINER, 's
 const NEW = 'sight-flow-new', UPD = 'sight-flow-upd', PULL = 'hello-world:latest', MIRROR = 'https://mirror.sight-flow.example';
 const NET = 'sight-flow-net', VOL = 'sight-flow-vol', PRUNE_VOL = 'sight-flow-prune', PROJECT = 'sightflow', EXT = 'sightext';
 const LIM = 'sight-flow-lim', UPD2 = 'sight-flow-upd2', BAD = 'sight-flow-bad', BAD_REF = 'sightflow/nonexistent:latest', STOPPED = 'sight-flow-stopped';
+const SICK = 'sight-flow-sick', HINT_IMAGE = 'sight-flow-hint:1', LIM_VOL = 'sight-flow-limvol', MVNET = 'sight-flow-mv';
+const MIG_ROOT = '/tmp/docker-flow-mig/', MIG_VOL = 'sight-flow-migvol', MIG_NET = 'sight-flow-mignet';
+const DISK2_IMG = '/root/sight-docker-disk2.img';
 const UPDATES = '/tmp/sight-docker/updates.json';
 const FLOW_ROOT = '/tmp/docker-flow/';
 const PRESETS = ['https://docker.1ms.run', 'https://docker.m.daocloud.io'];
@@ -82,7 +88,8 @@ contract('sight.docker.volume', { list: { query: 'Table' }, create: { opts: 'Tab
 contract('sight.docker', {
 	logs: { id: 'String', tail: 'Integer', since: 'String' }, usage: {}, task_status: {}, pull_start: { image: 'String' },
 	recreate_start: { id: 'String', mode: 'String', name: 'String', body: 'Table' },
-	check_start: { images: 'Array' }, check_list: {}, update_start: { items: 'Array' }, search: { term: 'String' },
+	check_start: { images: 'Array' }, check_list: {}, update_start: { items: 'Array', mode: 'String' }, search: { term: 'String' },
+	logs_usage: {}, root_status: {}, migrate_start: { old_root: 'String', networks: 'Array', volumes: 'Array', containers: 'Array', projects: 'Array' },
 	compose_list: {}, compose_read: { name: 'String' }, compose_write: { name: 'String', content: 'String', create: 'Boolean' }, compose_start: { name: 'String', action: 'String', volumes: 'Boolean' },
 	terminal_start: { id: 'String', host: 'String', tls: 'Boolean' }, terminal_status: { id: 'String' }, terminal_stop: { id: 'String' },
 });
@@ -94,7 +101,7 @@ await withAclUser(['sight-ui'], async sid => {
 await withAclUser(['sight-ui', 'sight-plugin-docker'], async sid => {
 	for (const [o, m, p] of [['sight.docker', 'version', {}], ['sight.docker.container', 'list', { query: { all: true } }], ['sight.docker.image', 'list', {}], ['sight.docker.network', 'list', { query: {} }],
 		['sight.docker.volume', 'list', { query: {} }], ['sight.docker', 'task_status', {}], ['sight.docker', 'compose_list', {}], ['sight.docker', 'terminal_status', { id: 'sight-web' }],
-		['sight.docker', 'logs', { id: 'sight-job', tail: 5 }], ['sight.docker', 'usage', {}], ['sight.docker', 'check_list', {}], ['sight.docker', 'search', { term: 'x;y' }], ['uci', 'get', { config: 'dockerd' }]])
+		['sight.docker', 'logs', { id: 'sight-job', tail: 5 }], ['sight.docker', 'usage', {}], ['sight.docker', 'check_list', {}], ['sight.docker', 'search', { term: 'x;y' }], ['sight.docker', 'logs_usage', {}], ['sight.docker', 'root_status', {}], ['uci', 'get', { config: 'dockerd' }]])
 		check((await ubus(sid, o, m, p))?.[0] === 0, `加上本包权限组后可调用 ${o}.${m}`);
 	/* 写操作用不存在的对象试探：放行时由 Docker 回 4xx，而不是被 ACL 拒绝 */
 	const missing = 'sight-flow-missing';
@@ -116,11 +123,16 @@ await withAclUser(['sight-ui', 'sight-plugin-docker'], async sid => {
 	const badItems = await ubus(sid, 'sight.docker', 'update_start', { items: [{ id: '-x', body: {} }] });
 	const badSince = await ubus(sid, 'sight.docker', 'logs', { id: 'sight-job', tail: 5, since: '1; id' });
 	const badTerm = await ubus(sid, 'sight.docker', 'search', { term: '$(touch /tmp/sight-flow-pwned)' });
+	const badMode2 = await ubus(sid, 'sight.docker', 'update_start', { items: [{ id: 'sight-web', body: {} }], mode: 'rm' });
+	const badMig = await ubus(sid, 'sight.docker', 'migrate_start', { old_root: '/tmp/../etc', networks: [], volumes: [], containers: [], projects: [] });
+	const badMigImage = await ubus(sid, 'sight.docker', 'migrate_start', { old_root: '/tmp/x', networks: [], volumes: [], containers: [{ name: 'xy', running: false, body: { Image: 'a; id' } }], projects: [] });
+	const badMount = await ubus(sid, 'sight.storage', 'mount', { device: '/dev/sight-flow-none', target: '/etc/x', auto: false });
 	check(injected?.[1]?.error === 'invalid image' && badRecreate?.[1]?.error === 'invalid image' && badMode?.[1]?.error === 'invalid' && badProject?.[1]?.error === 'invalid'
 		&& badAction?.[1]?.error === 'invalid' && badHost?.[1]?.error === 'not_lan' && badId?.[1]?.error === 'invalid'
 		&& badCheck?.[1]?.error === 'invalid image' && badDigest?.[1]?.error === 'invalid image' && badItems?.[1]?.error === 'invalid' && badSince?.[1]?.code === 400 && badTerm?.[1]?.error === 'invalid'
+		&& badMode2?.[1]?.error === 'invalid' && badMig?.[1]?.error === 'invalid' && badMigImage?.[1]?.error === 'invalid image' && !denied(badMount) && badMount?.[0] !== 0
 		&& sh('[ -e /tmp/sight-flow-pwned ] && echo yes || echo no').trim() === 'no', 'sight.docker 拒绝不合格的镜像引用（含检查更新）、模式、项目名、终端监听地址、容器 ID 与日志起始时间',
-	{ injected, badRecreate, badMode, badProject, badAction, badHost, badId, badCheck, badDigest, badItems, badSince, badTerm });
+	{ injected, badRecreate, badMode, badProject, badAction, badHost, badId, badCheck, badDigest, badItems, badSince, badTerm, badMode2, badMig, badMigImage, badMount });
 	const cli = await ubus(sid, 'file', 'exec', { command: '/usr/bin/docker', params: ['logs', '--tail', '200', '--timestamps', 'f'.repeat(64)] });
 	check(cli?.[0] === 6, '不放行 docker CLI', cli);
 	const rejected = [
@@ -148,9 +160,11 @@ const flowVolumes = [];
 let certAdded = false;
 /* 数据盘建议：调试容器（有 /etc/sight-dev-container 标记、能用 losetup）里临时挂一块 ext4 盘 */
 const DISK_IMG = '/root/sight-docker-disk.img', DISK_MNT = '/mnt/sight-docker-check';
-let diskLoop = '';
+let diskLoop = '', disk2Loop = '';
 if (sh('[ -f /etc/sight-dev-container ] && ubus list sight.storage >/dev/null 2>&1 && command -v losetup >/dev/null && echo yes || echo no').trim() === 'yes') {
 	diskLoop = sh(`dd if=/dev/zero of=${DISK_IMG} bs=1M count=64 2>/dev/null; l=$(losetup -f --show ${DISK_IMG}); mkfs.ext4 -q -F $l >/dev/null 2>&1; mkdir -p ${DISK_MNT}; mount -t ext4 $l ${DISK_MNT}; echo $l`).trim();
+	/* 第二块不挂载，验收「挂载并使用」 */
+	disk2Loop = sh(`dd if=/dev/zero of=${DISK2_IMG} bs=1M count=64 2>/dev/null; l=$(losetup -f --show ${DISK2_IMG}); mkfs.ext4 -q -F -L sightflow2 $l >/dev/null 2>&1; echo $l`).trim();
 }
 if (dockerReady) {
 	original.policy = DIND(`docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' sight-web`).trim() || 'no';
@@ -233,6 +247,27 @@ try {
 		await setAll('[data-container-search]', ['']);
 		await waitFor(`!!document.querySelector('tr[data-container="sight-web"]')`, '清空搜索');
 		check(true, '容器列表按名称等搜索（不区分大小写），无结果时说明');
+
+		/* 数据目录在 tmpfs（本测试环境）：页面提醒重启后会丢 */
+		if (sh('ubus call sight.docker root_status').includes('"tmpfs"'))
+			check(await page.evaluate(`!!document.querySelector('[data-root-problem="temporary"]')`), '数据目录在内存里时提醒路由器重启后会丢失');
+
+		/* 健康检查失败：顶部提醒、列表标记、详情说明 */
+		DIND(`docker run -d --name ${SICK} --health-cmd false --health-interval 1s --health-retries 1 --health-start-period 0s -e SICK=1 busybox:stable sleep 3600 >/dev/null`);
+		for (let i = 0; i < 20 && inspect(SICK, '{{.State.Health.Status}}') !== 'unhealthy'; i++) await sleep(1000);
+		await refresh();
+		await waitFor(`!!document.querySelector('tr[data-container="${SICK}"] [data-unhealthy]') && (document.querySelector('[data-trouble]')?.textContent || '').includes('${SICK}')`, '健康检查失败的提醒', 20000);
+		check(true, '健康检查失败的容器在列表标为不健康，页面顶部提醒');
+		await openContainer(SICK);
+		await waitFor(`!!${drawer}.querySelector('[data-container-trouble]')`, '详情里的异常说明');
+		const sickText = await page.evaluate(`${drawer}.textContent`);
+		check(/health check fails/.test(sickText) && /Unhealthy/.test(sickText) && /IP address/.test(sickText) && /172\.\d+\.\d+\.\d+/.test(sickText), '详情说明健康检查失败，并显示健康状态与容器 IP', sickText.slice(0, 300));
+		await page.evaluate(`${drawer}.querySelector('details summary') && [...${drawer}.querySelectorAll('details summary')].find(s => /Environment variables/.test(s.textContent))?.click()`);
+		check(await page.evaluate(`(${drawer}.querySelector('[data-env]')?.textContent || '').includes('SICK=1')`), '详情可展开查看环境变量');
+		await screenshot('docker-unhealthy');
+		await closeDrawer();
+		DIND(`docker rm -f ${SICK} >/dev/null`);
+		await refresh();
 
 		section('详情：日志、资源占用、重启策略');
 		await openContainer('sight-job');
@@ -377,14 +412,14 @@ try {
 		await page.evaluate(`document.querySelector('[data-create-form]').requestSubmit()`);
 		await waitFor(`!!document.querySelector('[data-create-form] .error-summary')`, '表单校验');
 		check(await page.evaluate(`/at least 2 characters/.test(document.querySelector('[data-create-form] .error-summary').textContent)`), '名称不合格时表单摘要说明原因，不提交');
-		await fill({ 'create-image': 'busybox:stable', 'create-name': NEW, 'create-command': 'sh -c "echo flow ready; sleep 3600"' });
-		await clickText('[data-create-form] button', 'Add port');
-		await clickText('[data-create-form] button', 'Add folder');
-		await sleep(200);
-		await setAll('[data-port-row] input', ['8089', '80']);
-		await setAll('[data-mount-row] input:not([type=checkbox])', ['/tmp/sight-flow', '/data']);
-		await page.evaluate(`document.querySelector('[data-mount-row] input[type=checkbox]').click()`);
-		await fill({ 'create-env': 'FOO=bar' });
+		/* 从 docker run 命令导入：续行、合写短选项；表单不支持的参数逐条说明 */
+		await page.evaluate(`[...document.querySelectorAll('[data-create-form] details summary')].find(s => /Import a docker run command/.test(s.textContent)).click()`);
+		await fill({ 'create-import': `docker run -d --name ${NEW} \\\n  -p 8089:80 -v /tmp/sight-flow:/data:ro -e FOO=bar \\\n  --restart unless-stopped --init busybox:stable sh -c "echo flow ready; sleep 3600"` });
+		await page.evaluate(`document.querySelector('[data-action=import]').click()`);
+		await waitFor(`!!document.querySelector('[data-import-notes]')`, '导入结果');
+		const imported = await page.evaluate(`({ name: document.getElementById('create-name').value, image: document.getElementById('create-image').value, ports: [...document.querySelectorAll('[data-port-row] input')].map(i => i.value), cmd: document.getElementById('create-command').value, notes: document.querySelector('[data-import-notes]').textContent })`);
+		check(imported.name === NEW && imported.image === 'busybox:stable' && imported.ports.join() === '8089,80' && imported.cmd === 'sh -c "echo flow ready; sleep 3600"' && /--init/.test(imported.notes),
+			'粘贴 docker run 命令（含续行）填好表单：名称、本机镜像、端口、目录、环境变量与命令；不支持的 --init 逐条说明', imported);
 		await screenshot('docker-create');
 		await page.evaluate(`document.querySelector('[data-create-form]').requestSubmit()`);
 		await waitFor(`/Created and started ${NEW}/.test(${main}) && !!document.querySelector('tr[data-container="${NEW}"]')`, '新建容器', 40000);
@@ -392,6 +427,7 @@ try {
 		check(created.State.Running && created.HostConfig.PortBindings?.['80/tcp']?.[0]?.HostPort === '8089' && created.HostConfig.Binds?.[0] === '/tmp/sight-flow:/data:ro'
 			&& created.Config.Env.includes('FOO=bar') && created.HostConfig.RestartPolicy.Name === 'unless-stopped' && created.Config.Cmd.join('|') === 'sh|-c|echo flow ready; sleep 3600',
 		'新建的容器已运行，端口、只读目录、环境变量、命令与重启策略与表单一致', { binds: created.HostConfig.Binds, ports: created.HostConfig.PortBindings, cmd: created.Config.Cmd, env: created.Config.Env });
+		check(created.HostConfig.LogConfig?.Type === 'json-file' && created.HostConfig.LogConfig.Config?.['max-size'] === '10m' && created.HostConfig.LogConfig.Config?.['max-file'] === '3', '新建容器默认带日志上限（10 MB × 3）', created.HostConfig.LogConfig);
 		const expectLink = `${new URL(BASE).protocol}//${new URL(BASE).hostname}:8089/`;
 		const link = await page.evaluate(`(() => { const a = document.querySelector('tr[data-container="${NEW}"] a[data-open-link]'); return a && { href: a.getAttribute('href'), target: a.target, rel: a.rel }; })()`);
 		check(link?.href === expectLink && link.target === '_blank' && /noopener/.test(link.rel), '发布了 TCP 端口的容器在列表给「打开」链接（浏览器访问的主机名 + 设备端口，新标签页）', link);
@@ -406,6 +442,23 @@ try {
 		await confirmDialog('Delete');
 		await waitFor(`/Deleted ${NEW}/.test(${main}) && !document.querySelector('tr[data-container="${NEW}"]') && !document.querySelector('dialog.drawer[open]')`, '删除容器', 40000);
 		check(!exists(NEW), '设备上的容器已删除');
+
+		/* 镜像建议：本机镜像的 EXPOSE 端口与 VOLUME 目录 */
+		DIND(`docker commit --change 'EXPOSE 80' --change 'EXPOSE 5353/udp' --change 'VOLUME /config' sight-web ${HINT_IMAGE} >/dev/null`);
+		await refresh();
+		await page.evaluate(`document.querySelector('[data-action=create]').click()`);
+		await waitFor(`!!document.querySelector('[data-create-form]')`, '新建容器表单');
+		await fill({ 'create-image': HINT_IMAGE });
+		await waitFor(`!!document.querySelector('[data-image-hints]')`, '镜像建议');
+		await page.evaluate(`document.querySelector('[data-action=use-hints]').click()`);
+		await sleep(300);
+		const hinted = await page.evaluate(`({ ports: [...document.querySelectorAll('[data-port-row]')].map(r => [...r.querySelectorAll('input')].map(i => i.value).join('>') + '/' + r.querySelector('select').value), mounts: [...document.querySelectorAll('[data-mount-row] input:not([type=checkbox])')].map(i => i.value) })`);
+		const appBase = (sh('uci -q get dockerd.globals.data_root || echo /opt/docker/').trim().replace(/\/+$/, '').replace(/\/[^/]*$/, '') || '') + '/appdata';
+		check([...hinted.ports].sort().join() === '5353>5353/udp,8080>80/tcp' && hinted.mounts.join() === `${appBase}/sight-flow-hint/config,/config`, '选本机镜像时按 EXPOSE / VOLUME 建议端口（1024 以下加 8000）与同盘 appdata 下的目录', hinted);
+		await page.evaluate(`document.querySelector('dialog.drawer[open] .close').click()`);
+		await confirmDialog('Discard edits');
+		await waitFor(`!document.querySelector('dialog.drawer[open]')`, '放弃并关闭');
+		DIND(`docker rmi ${HINT_IMAGE} >/dev/null`);
 
 		section('下载与清理镜像');
 		await tab('Images');
@@ -580,6 +633,16 @@ try {
 				} else check(false, '检查更新（需要外网访问 Docker Hub 或镜像加速）', results);
 				await screenshot('docker-check');
 				await dismissTask();
+
+				/* 批量按新配置重建（补日志上限用的 edit 模式）：只动流程自建的 UPD2 */
+				const upd2Before = JSON.parse(DIND(`docker inspect ${UPD2}`))[0];
+				since = now();
+				const started = sd('update_start', { items: [{ id: UPD2, body: { Image: 'busybox:latest', Cmd: ['sleep', '3600'], HostConfig: { LogConfig: { Type: 'json-file', Config: { 'max-size': '10m', 'max-file': '3' } } } } }], mode: 'edit' });
+				for (let i = 0; i < 120 && !(taskStatus()?.started >= since && taskStatus()?.state !== 'running'); i++) await sleep(1000);
+				const upd2After = JSON.parse(DIND(`docker inspect ${UPD2}`))[0];
+				check(started.task?.mode === 'edit' && taskStatus()?.state === 'done' && upd2After.Id !== upd2Before.Id && upd2After.State.Running && upd2After.HostConfig.LogConfig.Config?.['max-size'] === '10m',
+					'批量按新配置重建（edit 模式）：不找新版，按给定配置重建并启动', { task: taskStatus(), log: upd2After.HostConfig.LogConfig });
+				await refresh();
 				DIND(`docker rm -f ${UPD2} ${BAD} >/dev/null; docker rmi ${BAD_REF} >/dev/null 2>&1; true`);
 			} else check(false, '批量更新（需要前面的更新流程拉到新版 busybox:latest）');
 		}
@@ -617,6 +680,15 @@ try {
 		const errText = await page.evaluate(`document.querySelector('[data-create-form] .error-summary').textContent`);
 		check(/subnet 172\.31\.250\.0\/24/.test(errText) && /at least 6/.test(errText) && /CPU cores from 0\.01/.test(errText), '固定地址不在子网内、内存过小、CPU 超过核数时说明原因', errText);
 		await fill({ 'create-ip': '172.31.250.10', 'create-hostname': 'flow-host', 'create-memory': '64', 'create-cpus': '0.5', 'create-devices': '/dev/full', 'create-command': 'sleep 3600' });
+		/* 仅本机监听的端口、命名卷、VPN 一键项（NET_ADMIN + /dev/net/tun） */
+		await clickText('[data-create-form] button', 'Add port');
+		await clickText('[data-create-form] button', 'Add folder');
+		await sleep(200);
+		await setAll('[data-port-row] input', ['8095', '80']);
+		await page.evaluate(`(() => { const s = document.querySelectorAll('[data-port-row] select')[1]; s.value = '127.0.0.1'; s.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+		await setAll('[data-mount-row] input:not([type=checkbox])', [LIM_VOL, '/vol']);
+		await page.evaluate(`document.querySelector('[data-action=add-vpn]').click()`);
+		await sleep(200);
 		if (zone) {
 			await page.evaluate(`document.querySelector('[data-action=add-tz]').click()`);
 			await waitFor(`document.querySelector('[data-create-form]').textContent.includes('TZ=${zone}') && !document.querySelector('[data-action=add-tz]')`, '一键加入路由器时区');
@@ -632,6 +704,9 @@ try {
 			&& lim.HostConfig.Memory === 64 * 1048576 && lim.HostConfig.NanoCpus === 5e8 && lim.HostConfig.Devices?.[0]?.PathOnHost === '/dev/full'
 			&& (!zone || lim.Config.Env.includes(`TZ=${zone}`)), '新建的容器使用固定地址、主机名、内存/CPU 上限、设备直通与路由器时区',
 		{ ip: ipOf(lim), host: lim.Config.Hostname, mem: lim.HostConfig.Memory, cpu: lim.HostConfig.NanoCpus, dev: lim.HostConfig.Devices, env: lim.Config.Env });
+		check(lim.HostConfig.PortBindings?.['80/tcp']?.[0]?.HostIp === '127.0.0.1' && lim.HostConfig.Binds?.includes(`${LIM_VOL}:/vol`) && lim.HostConfig.CapAdd?.includes('NET_ADMIN')
+			&& lim.HostConfig.Devices?.some(d => d.PathOnHost === '/dev/net/tun'), '端口可只让本机访问；目录行可填命名卷；一键加入 VPN 所需的 NET_ADMIN 与 /dev/net/tun',
+		{ ports: lim.HostConfig.PortBindings, binds: lim.HostConfig.Binds, caps: lim.HostConfig.CapAdd, dev: lim.HostConfig.Devices });
 		if (LOCAL) {
 			await openContainer(LIM);
 			await page.evaluate(`${drawer}.querySelector('[data-action=edit]').click()`);
@@ -648,10 +723,40 @@ try {
 			'编辑后重建：改动的内存上限与地址生效，其余限制保留', { text: le.text, mem: limEdited.HostConfig.Memory, ip: ipOf(limEdited) });
 			await dismissTask();
 		}
-		DIND(`docker rm -f ${LIM} >/dev/null`);
+		DIND(`docker rm -f ${LIM} >/dev/null; docker volume rm ${LIM_VOL} >/dev/null 2>&1; true`);
 		await refresh();
 		await tab('Networks and volumes');
 		await waitFor(`!!document.querySelector('tr[data-network="${NET}"]')`, '回到网络列表');
+
+		section('macvlan 网络');
+		/* 本测试容器的 LAN 口没起来：页面说明读不到，手动填写父接口与网段（用容器自己的 eth0） */
+		const ethNet = sh(`ip -4 -o addr show eth0 | awk '{print $4}'`).trim();
+		const [ethIp, ethPrefix] = ethNet.split('/');
+		const ethSubnet = DIND(`docker run --rm busybox:stable ipcalc -n ${ethNet} 2>/dev/null || true`).trim().replace(/^NETWORK=/, '');
+		await page.evaluate(`document.querySelector('[data-action=network-new]').click()`);
+		await waitFor(`!!document.querySelector('[data-network-form]')`, '新建网络表单');
+		await page.evaluate(`document.querySelector('[data-network-form] input[name="network-driver"][value="macvlan"]').click()`);
+		await waitFor(`!!document.querySelector('[data-macvlan]')`, 'macvlan 表单');
+		const mvText = await page.evaluate(`document.querySelector('[data-macvlan]').textContent`);
+		check(/router itself cannot reach/.test(mvText), 'macvlan 说明路由器本机连不到这些容器', mvText.slice(0, 160));
+		const gateway = sh(`ip -4 route | awk '/default/ {print $3; exit}'`).trim();
+		await fill({ 'network-name': MVNET, 'network-parent': 'eth0', 'network-subnet': `${ethSubnet}/${ethPrefix}`, 'network-gateway': gateway, 'network-range': '10.0.0.0/27' });
+		await page.evaluate(`document.querySelector('[data-network-form]').requestSubmit()`);
+		await waitFor(`!!document.querySelector('[data-network-form] .error-summary')`, '分配范围校验');
+		check(await page.evaluate(`/part of the subnet/.test(document.querySelector('[data-network-form] .error-summary').textContent)`), '分配范围不在子网内时说明', ethIp);
+		const range = ethSubnet.replace(/\.\d+\.\d+$/, '.250.0') + '/27';
+		await fill({ 'network-range': range });
+		await page.evaluate(`document.querySelector('[data-network-form]').requestSubmit()`);
+		await waitFor(`!!document.querySelector('tr[data-network="${MVNET}"]')`, '新建 macvlan 网络', 30000);
+		const mv = JSON.parse(DIND(`docker network inspect ${MVNET}`))[0];
+		check(mv.Driver === 'macvlan' && mv.Options?.parent === 'eth0' && mv.IPAM.Config[0].IPRange === range && /LAN addresses/.test(await page.evaluate(`document.querySelector('tr[data-network="${MVNET}"]').textContent`)),
+			'新建 macvlan 网络：父接口、子网、网关与分配范围写入 Docker，列表标为局域网地址', { driver: mv.Driver, options: mv.Options, ipam: mv.IPAM.Config });
+		const mvIp = DIND(`docker run --rm --network ${MVNET} busybox:stable ip -4 -o addr show eth0 | awk '{print $4}'`).trim();
+		check(mvIp.startsWith(range.replace(/\.0\/27$/, '.')), '接入 macvlan 网络的容器拿到分配范围里的地址', mvIp);
+		await screenshot('docker-macvlan');
+		await clickText(`tr[data-network="${MVNET}"] .actions button`, 'Delete');
+		await confirmDialog('Delete');
+		await waitFor(`!document.querySelector('tr[data-network="${MVNET}"]')`, '删除 macvlan 网络', 30000);
 		await page.evaluate(`document.querySelector('[data-action=volume-new]').click()`);
 		await waitFor(`!!document.querySelector('[data-volume-form]')`, '新建卷表单');
 		await fill({ 'volume-name': VOL });
@@ -775,6 +880,12 @@ try {
 		await waitFor(`!!document.querySelector('[data-storage-row="containers"]')`, '存储空间');
 		const rows = await page.evaluate(`Object.fromEntries([...document.querySelectorAll('[data-storage-row]')].map(r => [r.dataset.storageRow, r.textContent]))`);
 		check(/\d+(\.\d+)? [KMG]?B/.test(rows.images) && /stopped containers/.test(rows.containers) && 'volumes' in rows, '列出镜像、容器与卷的占用与可清理量', rows);
+		await waitFor(`!!document.querySelector('[data-storage-row="logs"]')`, '容器日志一行');
+		check(await page.evaluate(`/containers without a size limit/.test(document.querySelector('[data-storage-row="logs"]').textContent)`), '存储空间列出容器日志占用与没有上限的容器数');
+		await page.evaluate(`document.querySelector('[data-clean=logs]').click()`);
+		await waitFor(`!!document.querySelector('dialog[role=alertdialog][open] [data-limit-logs]')`, '设置日志上限确认');
+		check(await page.evaluate(`/sight-web/.test(document.querySelector('[data-limit-logs]').textContent) && /recreated with a log limit/.test(document.querySelector('[data-limit-logs]').textContent)`), '设置日志上限前列出要重建的容器并说明会短暂停止');
+		await clickText('dialog[role=alertdialog][open] .actions button', 'Cancel');
 		await screenshot('docker-storage');
 		await page.evaluate(`document.querySelector('[data-clean=containers]').click()`);
 		await waitFor(`!!document.querySelector('dialog[role=alertdialog][open] [data-clean-containers]')`, '清理确认');
@@ -792,7 +903,53 @@ try {
 		}
 		restoreJob();
 
+		if (LOCAL) {
+			section('迁移数据目录');
+			DIND(`docker volume create ${MIG_VOL} >/dev/null && docker run --rm -v ${MIG_VOL}:/v busybox:stable sh -c 'echo moved > /v/f' && docker network create --subnet 172.31.241.0/24 ${MIG_NET} >/dev/null`);
+			const webBefore = inspect('sight-web', '{{.Id}}'), rootBefore = json('ubus call sight.docker info').body.DockerRootDir;
+			await refresh();
+			await tab('Settings');
+			await waitFor(`!!document.querySelector('[data-docker-settings]')`, '设置表单');
+			await fill({ 'docker-data-root': MIG_ROOT });
+			await waitFor(`!!document.querySelector('[data-migrate]') && !!document.querySelector('[data-migrate-note]')`, '迁移选项');
+			check(await page.evaluate(`document.querySelector('[data-migrate]').checked`), '换数据目录时默认勾选迁移，并说明会重建容器、复制卷数据、旧目录保留');
+			await screenshot('docker-migrate-settings');
+			since = now();
+			await page.evaluate(`document.querySelector('[data-docker-settings]').requestSubmit()`);
+			await apply('迁移：保存数据目录');
+			const mig = await taskDone('迁移', since, '[data-docker-task]', 400000);
+			const migRoot = json('ubus call sight.docker info').body.DockerRootDir;
+			check(mig.state === 'done' && mig.task.kind === 'migrate' && migRoot.replace(/\/+$/, '') === MIG_ROOT.replace(/\/+$/, '') && containerRunning('sight-web') && exists('sight-job')
+				&& DIND(`docker run --rm -v ${MIG_VOL}:/v busybox:stable cat /v/f`).trim() === 'moved' && DIND(`docker network inspect -f '{{(index .IPAM.Config 0).Subnet}}' ${MIG_NET}`).trim() === '172.31.241.0/24',
+			'迁移：Docker 换到新目录，网络、卷数据与容器按原配置重建，运行中的照常运行', { state: mig.state, text: mig.text, root: migRoot });
+			await screenshot('docker-migrate');
+			await dismissTask();
+			/* 换回：不勾迁移，保存后按提示重启 Docker，原来的容器原样回来 */
+			await tab('Settings');
+			await fill({ 'docker-data-root': original.root });
+			await waitFor(`!!document.querySelector('[data-migrate]')`, '迁移选项');
+			await page.evaluate(`document.querySelector('[data-migrate]').checked && document.querySelector('[data-migrate]').click()`);
+			await page.evaluate(`document.querySelector('[data-docker-settings]').requestSubmit()`);
+			await apply('换回原数据目录');
+			await waitFor(`!!document.querySelector('[data-restart-needed]')`, '换回后提示重启', 30000);
+			await clickText('[data-restart-needed] button', 'Restart Docker');
+			await confirmDialog('Restart');
+			await waitFor(`!!document.querySelector('[data-docker="up"]') && !document.querySelector('[data-restart-needed]')`, '重启 Docker', 90000);
+			DIND('docker start sight-web >/dev/null');
+			check(json('ubus call sight.docker info').body.DockerRootDir === rootBefore && inspect('sight-web', '{{.Id}}') === webBefore, '换回原数据目录（不迁移）并重启后，原来的容器原样回来；新目录的数据保留在原处');
+			DIND(`docker volume rm ${MIG_VOL} >/dev/null; docker network rm ${MIG_NET} >/dev/null`);
+			sh(`for m in $(grep " ${MIG_ROOT.replace(/\/+$/, '')}" /proc/mounts | cut -d" " -f2 | sort -r); do umount -l "$m"; done; rm -rf ${MIG_ROOT}`);
+			await refresh();
+		}
+
 		section('设置');
+		/* 本节假定一开始没有镜像加速：清掉并重启 Docker 使运行值一致（结束时恢复原配置） */
+		sh('uci -q delete dockerd.globals.registry_mirrors; uci commit dockerd; /etc/init.d/dockerd restart');
+		for (let i = 0; i < 60; i++) { try { if (/"code":\s*200/.test(sh('ubus call sight.docker version'))) break; } catch { /* 等待 */ } await sleep(1000); }
+		DIND('docker start sight-web >/dev/null');
+		await refresh();
+		/* 迁移一节结束时可能已停在设置页：切走再切回，按清空后的配置重新载入 */
+		await tab('Containers');
 		await tab('Settings');
 		await waitFor(`!!document.querySelector('[data-docker-settings]')`, '设置表单');
 		if (diskLoop) {
@@ -802,8 +959,21 @@ try {
 			if (onInternal) check(await page.evaluate(`/internal storage/.test(document.querySelector('[data-docker-settings]').textContent)`), '数据目录在内部存储上时提示改用数据盘');
 			await page.evaluate(`${disk}.click()`);
 			check(await page.evaluate(`document.getElementById('docker-data-root').value`) === `${DISK_MNT}/docker` && await page.evaluate(`${disk}.disabled`), '列出已挂载的 ext4 数据盘，一键填入 <挂载点>/docker');
+			if (disk2Loop) {
+				const mountBtn = `document.querySelector('[data-docker-disks] [data-disk-mount="${disk2Loop}"]')`;
+				await waitFor(`!!${mountBtn}`, '未挂载的分区');
+				await page.evaluate(`${mountBtn}.click()`);
+				await waitFor(`document.getElementById('docker-data-root').value === '/mnt/sightflow2/docker'`, '挂载并使用', 30000);
+				check(sh('grep -c " /mnt/sightflow2 " /proc/mounts || true').trim() === '1' && sh('uci show fstab | grep -c "target=.\\/mnt\\/sightflow2." || true').trim() === '1'
+					&& await page.evaluate(`!!document.querySelector('[data-docker-disks] [data-disk="/mnt/sightflow2"]')`),
+				'未挂载的 ext4 分区可在本页挂载到 /mnt/<卷标>（开机自动挂载）并填入数据目录');
+				await screenshot('docker-settings-disks');
+			}
 		}
 		await fill({ 'docker-mirrors': MIRROR, 'docker-data-root': FLOW_ROOT });
+		/* 本节验收不迁移的普通切换：取消默认勾选的迁移 */
+		await waitFor(`!!document.querySelector('[data-migrate]')`, '迁移选项');
+		await page.evaluate(`document.querySelector('[data-migrate]').checked && document.querySelector('[data-migrate]').click()`);
 		await waitFor(`/are no longer shown/.test(document.querySelector('[data-docker-settings]').textContent)`, '数据目录提示');
 		check(true, '改数据目录前提示原有镜像与容器不可见');
 		await screenshot('docker-settings');
@@ -897,9 +1067,11 @@ try {
 	}
 } finally {
 	if (diskLoop) sh(`umount ${DISK_MNT}; losetup -d ${diskLoop}; rm -f ${DISK_IMG}; rmdir ${DISK_MNT}; true`);
+	if (disk2Loop) sh(`umount /mnt/sightflow2 2>/dev/null; rmdir /mnt/sightflow2 2>/dev/null; for s in $(uci show fstab | grep "target='/mnt/sightflow2'" | cut -d. -f2); do uci delete fstab.$s; done; uci commit fstab; losetup -d ${disk2Loop}; rm -f ${DISK2_IMG}; true`);
 	if (dockerReady) {
 		/* 无论成败都恢复：删除流程容器、项目、网络、卷与下载的镜像，恢复重启策略、证书与 dockerd 设置 */
-		const cleanup = [`docker rm -f ${NEW} ${UPD} ${UPD}-sight-old ${LIM} ${UPD2} ${UPD2}-sight-old ${BAD} ${BAD}-sight-old ${STOPPED} >/dev/null 2>&1; true`, `docker rmi ${BAD_REF} >/dev/null 2>&1; true`,
+		const cleanup = [`docker rm -f ${NEW} ${UPD} ${UPD}-sight-old ${LIM} ${UPD2} ${UPD2}-sight-old ${BAD} ${BAD}-sight-old ${STOPPED} ${SICK} >/dev/null 2>&1; true`, `docker rmi ${BAD_REF} ${HINT_IMAGE} >/dev/null 2>&1; true`,
+			`docker volume rm ${LIM_VOL} ${MIG_VOL} >/dev/null 2>&1; docker network rm ${MVNET} ${MIG_NET} >/dev/null 2>&1; true`,
 			`docker update --restart=${original.policy} sight-web >/dev/null`,
 			original.hadPull ? 'true' : `docker rmi ${PULL} >/dev/null 2>&1; true`, `docker network rm ${NET} >/dev/null 2>&1; true`,
 			`docker volume rm ${[VOL, PRUNE_VOL, `${PROJECT}_data`, ...flowVolumes].filter(Boolean).join(' ')} >/dev/null 2>&1; true`];
@@ -915,11 +1087,15 @@ try {
 			const seeded = original.seeded ? `uci set dockerd.globals.sight_mirrors_seeded='${original.seeded}';` : 'uci -q delete dockerd.globals.sight_mirrors_seeded;';
 			sh(`uci -q delete dockerd.globals.registry_mirrors; ${mirrors} ${root} ${seeded} uci commit dockerd; rm -rf /tmp/sight-flow`);
 			/* 运行中的加速地址与配置不一致时重启 dockerd（reload 清不掉），再拉起 sight-web */
-			const running = JSON.stringify((json('ubus call sight.docker info').body.RegistryConfig?.Mirrors || []).map(m => m.replace(/\/$/, '')).sort());
+			const runInfo = json('ubus call sight.docker info').body;
+			const running = JSON.stringify((runInfo.RegistryConfig?.Mirrors || []).map(m => m.replace(/\/$/, '')).sort());
 			const wanted = JSON.stringify(original.mirrors ? original.mirrors.split(/\s+/).sort() : []);
-			sh(running === wanted ? '/etc/init.d/dockerd reload' : '/etc/init.d/dockerd restart');
+			/* 迁移验收中途失败时 Docker 可能还在测试目录上：数据目录不一致也重启 */
+			const sameRoot = (runInfo.DockerRootDir || '').replace(/\/+$/, '') === (original.root || '/opt/docker').replace(/\/+$/, '');
+			sh(running === wanted && sameRoot ? '/etc/init.d/dockerd reload' : '/etc/init.d/dockerd restart');
 			for (let i = 0; i < 30; i++) { try { if (/"code":\s*200/.test(sh('ubus call sight.docker version'))) break; } catch { /* 等待 */ } await sleep(1000); }
 			DIND('docker start sight-web >/dev/null');
+			sh(`for m in $(grep " ${MIG_ROOT.replace(/\/+$/, '')}" /proc/mounts | cut -d" " -f2 | sort -r); do umount -l "$m"; done; rm -rf ${MIG_ROOT}`);
 		} catch { /* 忽略 */ }
 	}
 }

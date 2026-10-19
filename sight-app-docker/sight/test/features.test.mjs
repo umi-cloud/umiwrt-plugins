@@ -116,7 +116,7 @@ const inspect = () => ({
 
 test('编辑：预填主机名、资源限制、设备与固定地址；不改时原写法保留', () => {
 	const c = inspect(), base = recreateBody(c, null);
-	assert.deepEqual(limitsOf(base.body), { hostname: 'myhost', memory: '286', cpus: '1.5', devices: ['/dev/net/tun'], ip: '172.30.0.5' });
+	assert.deepEqual(limitsOf(base.body), { hostname: 'myhost', memory: '286', cpus: '1.5', devices: ['/dev/net/tun'], ip: '172.30.0.5', log: '', caps: [] });
 	const body = buildEdit(base, formFromInspect(c, base));
 	const pick = b => [b.Hostname, b.HostConfig.Memory, b.HostConfig.MemorySwap, b.HostConfig.NanoCpus, b.HostConfig.CpuQuota, b.HostConfig.CpuPeriod, b.HostConfig.Devices, b.NetworkingConfig];
 	assert.deepEqual(pick(body), pick(base.body));

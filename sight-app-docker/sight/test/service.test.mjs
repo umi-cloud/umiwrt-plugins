@@ -42,9 +42,14 @@ test('命令拆分：空白分隔，引号与转义保留空格；引号不配�
 test('新建容器：校验各项并指向出错控件', () => {
 	const form = { ...emptyCreate(), image: 'busybox:stable' };
 	assert.deepEqual(validateCreate(form), []);
-	const bad = { ...form, name: 'a', ports: [{ host: '0', container: '80', proto: 'tcp' }], mounts: [{ host: 'data', container: '/d', readonly: false }], env: ['NOVALUE'], command: 'echo "x' };
+	const bad = { ...form, name: 'a', ports: [{ host: '0', container: '80', proto: 'tcp' }], mounts: [{ host: 'da:ta', container: '/d', readonly: false }], env: ['NOVALUE'], command: 'echo "x' };
 	assert.deepEqual(validateCreate(bad).map(e => e.field), ['name', 'ports', 'mounts', 'env', 'command']);
 	assert.deepEqual(validateCreate({ ...form, name: 'web' }, ['web']).map(e => e.message), ['A container with this name already exists']);
+	/* 目录行可填命名卷；匿名卷名（64 位十六进制）不行 */
+	assert.deepEqual(validateCreate({ ...form, mounts: [{ host: 'appdata', container: '/d' }] }), []);
+	assert.deepEqual(validateCreate({ ...form, mounts: [{ host: 'f'.repeat(64), container: '/d' }] }).map(e => e.field), ['mounts']);
+	assert.deepEqual(validateCreate({ ...form, caps: ['net_admin', 'CAP_SYS_TIME'] }), []);
+	assert.deepEqual(validateCreate({ ...form, caps: ['NET ADMIN'] }).map(e => e.field), ['caps']);
 	assert.deepEqual(validateCreate({ ...form, ports: [{ host: '80', container: '80', proto: 'tcp' }, { host: '80', container: '81', proto: 'tcp' }] }).map(e => e.field), ['ports']);
 	/* 同一端口号 TCP/UDP 各一条不冲突；host 网络不校验端口；空行忽略 */
 	assert.deepEqual(validateCreate({ ...form, ports: [{ host: '53', container: '53', proto: 'tcp' }, { host: '53', container: '53', proto: 'udp' }, { host: '', container: '', proto: 'tcp' }] }), []);
@@ -59,11 +64,15 @@ test('新建容器：表单 → create 参数（端口、目录、环境变量�
 		query: { name: 'web' },
 		body: {
 			Image: 'busybox:stable', Env: ['TZ=Asia/Shanghai'], Cmd: ['httpd', '-f', '-p', '80'], ExposedPorts: { '80/tcp': {} },
-			HostConfig: { RestartPolicy: { Name: 'unless-stopped' }, NetworkMode: 'bridge', PortBindings: { '80/tcp': [{ HostPort: '8081' }] }, Binds: ['/mnt/a:/data:ro'], Privileged: true },
+			HostConfig: { RestartPolicy: { Name: 'unless-stopped' }, NetworkMode: 'bridge', PortBindings: { '80/tcp': [{ HostIp: '', HostPort: '8081' }] }, Binds: ['/mnt/a:/data:ro'], Privileged: true,
+				LogConfig: { Type: 'json-file', Config: { 'max-size': '10m', 'max-file': '3' } } },
 		},
 	});
-	const host = buildCreate({ ...emptyCreate(), source: 'pull', pullRef: 'nginx', network: 'host', restart: 'no', ports: [{ host: '80', container: '80', proto: 'tcp' }] });
+	const host = buildCreate({ ...emptyCreate(), source: 'pull', pullRef: 'nginx', network: 'host', restart: 'no', log: '', ports: [{ host: '80', container: '80', proto: 'tcp' }] });
 	assert.deepEqual(host, { query: {}, body: { Image: 'nginx:latest', HostConfig: { RestartPolicy: { Name: 'no' }, NetworkMode: 'host' } } });
+	/* 仅本机监听、命名卷、额外权限 */
+	const more = buildCreate({ ...emptyCreate(), image: 'busybox:stable', ports: [{ host: '8080', container: '80', proto: 'tcp', ip: '127.0.0.1' }], mounts: [{ host: 'appdata', container: '/data' }], caps: ['net_admin', 'NET_ADMIN'] }).body.HostConfig;
+	assert.deepEqual([more.PortBindings, more.Binds, more.CapAdd], [{ '80/tcp': [{ HostIp: '127.0.0.1', HostPort: '8080' }] }, ['appdata:/data'], ['NET_ADMIN']]);
 });
 
 test('资源占用：CPU 取两次采样之差按核数折算，内存扣除 inactive_file；取不到为 null', () => {
@@ -77,7 +86,8 @@ test('资源占用：CPU 取两次采样之差按核数折算，内存扣除 ina
 });
 
 test('详情与拉取进度整形', () => {
-	assert.deepEqual(detailOf({ HostConfig: { RestartPolicy: { Name: '' }, NetworkMode: 'bridge' }, Mounts: [{ Type: 'bind', Source: '/mnt/a', Destination: '/a', RW: false }, { Type: 'volume', Name: 'v1', Source: '/x/_data', Destination: '/b', RW: true }] }),
+	const { imageRef, restart, network, mounts } = detailOf({ HostConfig: { RestartPolicy: { Name: '' }, NetworkMode: 'bridge' }, Mounts: [{ Type: 'bind', Source: '/mnt/a', Destination: '/a', RW: false }, { Type: 'volume', Name: 'v1', Source: '/x/_data', Destination: '/b', RW: true }] });
+	assert.deepEqual({ imageRef, restart, network, mounts },
 		{ imageRef: '', restart: 'no', network: 'bridge', mounts: [{ type: 'bind', source: '/mnt/a', destination: '/a', readonly: true }, { type: 'volume', source: 'v1', destination: '/b', readonly: false }] });
 	assert.equal(pullPercent({ current: 50, total: 200 }), 25);
 	assert.equal(pullPercent({ current: 0, total: 0 }), null);

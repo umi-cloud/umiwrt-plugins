@@ -538,6 +538,8 @@ function public_task(t) {
 	if (!t) return null;
 	const out = without_body(t);
 	if (type(out.items) == 'array') out.items = map(out.items, without_body);
+	if (type(out.containers) == 'array') out.containers = map(out.containers, without_body);
+	delete out.networks;
 	return out;
 }
 
@@ -624,11 +626,12 @@ function check_list() {
 	return { images: read_json(UPDATES) || {} };
 }
 
-/* 批量更新：items 为 [{ id, body }]，body 同 recreate_start（页面按 inspect 构造）；逐个拉取原镜像引用，
-   有新版才重建，失败的恢复原容器后继续下一个 */
+/* 批量重建：items 为 [{ id, body }]，body 同 recreate_start（页面按 inspect 构造）。
+   mode=update（缺省）逐个拉取原镜像引用，有新版才重建；mode=edit 按 body 重建（如补日志上限），不找新版。
+   失败的恢复原容器后继续下一个 */
 function update_start(request) {
-	const items = request.args?.items;
-	if (type(items) != 'array' || !length(items) || length(items) > 50) return { error: 'invalid' };
+	const items = request.args?.items, mode = request.args?.mode || 'update';
+	if (type(items) != 'array' || !length(items) || length(items) > 50 || !(mode in ['update', 'edit'])) return { error: 'invalid' };
 	const list = [];
 	for (let it in items) {
 		if (type(it) != 'object' || type(it.id) != 'string' || !match(it.id, ID_PATTERN) || type(it.body) != 'object')
@@ -636,11 +639,52 @@ function update_start(request) {
 		const r = call_docker('GET', `/containers/${it.id}/json`);
 		if (r.code == 404) return { error: 'not_found' };
 		if (r.code >= 300) return { code: r.code, error: r.body?.message || 'failed' };
-		if (!valid_tag_ref(r.body.Config?.Image)) return { error: 'invalid image' };
+		const image = mode == 'update' ? r.body.Config?.Image : it.body.Image;
+		if (mode == 'update' ? !valid_tag_ref(image) : (type(image) != 'string' || length(image) > 255 || !match(image, IMAGE_PATTERN)))
+			return { error: 'invalid image' };
 		for (let x in list) if (x.id == r.body.Id) return { error: 'invalid' };
-		push(list, { id: r.body.Id, name: ltrim(r.body.Name, '/'), image: r.body.Config.Image, body: it.body });
+		push(list, { id: r.body.Id, name: ltrim(r.body.Name, '/'), image: image, body: it.body });
 	}
-	return start_task({ kind: 'update', items: list, steps: map(list, (x) => x.name) });
+	return start_task({ kind: 'update', mode: mode, items: list, steps: map(list, (x) => x.name) });
+}
+
+/* 数据目录实际所在的文件系统：取 /proc/mounts 里最长的前缀挂载（dockerd 会把数据目录绑定挂载到自身，fstype 即底层文件系统）。
+   shadowed：数据目录的上级在 Docker 启动后又挂上了别的盘（挂载记录在后），Docker 仍在用被盖住的旧位置，需重启 */
+function root_status() {
+	const r = call_docker('GET', '/info');
+	if (r.code >= 300) return { error: r.body?.message || 'failed' };
+	const root = rtrim(r.body.DockerRootDir || '', '/') || '/';
+	const under = (mp) => mp == '/' || root == mp || index(root + '/', mp + '/') == 0;
+	let best = null, best_at = -1, shadowed = false, n = 0;
+	const entries = [];
+	for (let line in split(fs.readfile('/proc/mounts') || '', '\n')) {
+		const f = split(line, ' ');
+		if (length(f) < 3) continue;
+		const mp = replace(f[1], /\\040/g, ' ');
+		if (!under(mp)) continue;
+		push(entries, { mount: mp, fstype: f[2], at: n++ });
+	}
+	for (let e in entries) if (!best || length(e.mount) >= length(best.mount)) { best = e; best_at = e.at; }
+	for (let e in entries) if (e.at > best_at && length(e.mount) < length(best.mount)) shadowed = true;
+	return { root: root, driver: r.body.Driver || '', fstype: best?.fstype || '', mount: best?.mount || '', shadowed: shadowed };
+}
+
+/* 各容器的日志配置与日志文件大小（json-file / local 驱动的文件在设备上） */
+function logs_usage() {
+	const r = call_docker('GET', '/containers/json', { query: { all: true } });
+	if (r.code >= 300) return { error: r.body?.message || 'failed' };
+	const out = [];
+	for (let c in (type(r.body) == 'array' ? r.body : [])) {
+		const i = call_docker('GET', `/containers/${c.Id}/json`);
+		if (i.code >= 300) continue;
+		const path = i.body.LogPath;
+		const st = type(path) == 'string' && length(path) ? fs.stat(path) : null;
+		let size = st?.size ?? null;
+		/* 已轮转的旧文件（<LogPath>.1 …）也算进去 */
+		if (st) for (let f in fs.glob(path + '.*') || []) size += fs.stat(f)?.size ?? 0;
+		push(out, { id: c.Id, name: ltrim(i.body.Name, '/'), project: c.Labels?.['com.docker.compose.project'] || '', log: i.body.HostConfig?.LogConfig || {}, size: size });
+	}
+	return { containers: out };
 }
 
 /* ---- Compose 项目：文件在 /etc/sight-docker/compose/<项目名>/compose.yaml ---- */
@@ -697,6 +741,26 @@ function compose_start(request) {
 	if (action != 'down' && !fs.access(`${project_dir(name)}/compose.yaml`)) return { error: 'not_found' };
 	const steps = { up: ['up'], pull: ['pull', 'up'], down: ['down'], remove: ['down', 'files'] }[action];
 	return start_task({ kind: 'compose', project: name, action: action, volumes: volumes, steps: steps });
+}
+
+/* 迁移到新数据目录（页面已保存新的 data_root）：后台任务重启 Docker，再按页面整理的配置重建网络、卷（复制数据）、
+   容器与 Compose 项目；旧数据目录不动。各项与 network/volume/container create 等权，镜像引用另行校验（后台会拉取） */
+function migrate_start(request) {
+	const a = request.args ?? {};
+	const old_root = a.old_root, nets = a.networks ?? [], vols = a.volumes ?? [], ctrs = a.containers ?? [], projects = a.projects ?? [];
+	if (type(old_root) != 'string' || !match(old_root, /^\/[A-Za-z0-9._\/-]*$/) || index(old_root, '..') >= 0 || length(old_root) > 255) return { error: 'invalid' };
+	if (type(nets) != 'array' || type(vols) != 'array' || type(ctrs) != 'array' || type(projects) != 'array') return { error: 'invalid' };
+	if (length(nets) > 50 || length(vols) > 200 || length(ctrs) > 100 || length(projects) > 50) return { error: 'invalid' };
+	for (let n in nets) if (type(n) != 'object' || type(n.Name) != 'string' || !match(n.Name, NAME_PATTERN)) return { error: 'invalid' };
+	for (let v in vols) if (type(v) != 'object' || type(v.name) != 'string' || !(match(v.name, NAME_PATTERN) || match(v.name, FULL_ID))) return { error: 'invalid' };
+	for (let c in ctrs) {
+		if (type(c) != 'object' || type(c.name) != 'string' || !match(c.name, NAME_PATTERN) || type(c.body) != 'object') return { error: 'invalid' };
+		const image = c.body.Image;
+		if (type(image) != 'string' || length(image) > 255 || !match(image, IMAGE_PATTERN)) return { error: 'invalid image' };
+	}
+	for (let p in projects) if (!valid_project(p) || !fs.access(`${project_dir(p)}/compose.yaml`)) return { error: 'invalid' };
+	return start_task({ kind: 'migrate', old_root: rtrim(old_root, '/'), networks: nets, volumes: vols, containers: ctrs, projects: projects,
+		steps: ['restart', 'networks', 'volumes', 'containers', 'compose'] });
 }
 
 /* ---- 容器终端：一次性的 ttyd 会话，只监听 LAN 侧地址 ---- */
@@ -861,7 +925,10 @@ const sight_methods = {
 	check_start:     { args: { images: [] }, call: check_start },
 	check_list:      { args: {}, call: check_list },
 	search:          { args: { term: '' }, call: image_search },
-	update_start:    { args: { items: [] }, call: update_start },
+	update_start:    { args: { items: [], mode: '' }, call: update_start },
+	logs_usage:      { args: {}, call: logs_usage },
+	root_status:     { args: {}, call: root_status },
+	migrate_start:   { args: { old_root: '', networks: [], volumes: [], containers: [], projects: [] }, call: migrate_start },
 	compose_list:    { args: {}, call: compose_list },
 	compose_read:    { args: { name: '' }, call: compose_read },
 	compose_write:   { args: { name: '', content: '', create: false }, call: compose_write },

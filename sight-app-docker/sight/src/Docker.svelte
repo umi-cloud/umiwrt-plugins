@@ -1,7 +1,7 @@
 <script>
 	import { onDestroy, tick } from 'svelte';
-	import { t, errorText, client, uci, activity, useEditor, requestLeave, createPoller, route, navigate, fmtBytes, Card, Tabs, Table, Toolbar, Badge, Button, Checkbox, Icon, StatusHero, Drawer, Dialog, Feedback, Field, Input, ErrorSummary, FormActions } from '@sight/sdk';
-	import { createDocker, isImageRef, normalizeImage, portLinks, groupContainers, cpuPercent, memoryUsage, updateState, checkRefs, lastChecked, statesChanged, matchContainer } from './service.js';
+	import { t, errorText, client, uci, activity, useEditor, requestLeave, createPoller, route, navigate, fmtBytes, Callout, Card, Tabs, Table, Toolbar, Badge, Button, Checkbox, Icon, StatusHero, Drawer, Dialog, Feedback, Field, Input, ErrorSummary, FormActions } from '@sight/sdk';
+	import { createDocker, isImageRef, normalizeImage, portLinks, groupContainers, cpuPercent, memoryUsage, updateState, checkRefs, lastChecked, statesChanged, matchContainer, troubleOf, rootProblem } from './service.js';
 	import { stateTone, stateLabel, short, date } from './format.js';
 	import ContainerDetail from './ContainerDetail.svelte';
 	import CreateContainer from './CreateContainer.svelte';
@@ -112,6 +112,7 @@
 	const allGroups = $derived(groupContainers(data?.containers || []));
 	/* 列表按搜索过滤；「全部更新」不受过滤影响 */
 	const groups = $derived(query.trim() ? groupContainers((data?.containers || []).filter(c => matchContainer(c, query))) : allGroups);
+	const volumeNames = $derived(Array.isArray(data?.volumes) ? data.volumes.filter(v => !v.anonymous).map(v => v.name) : []);
 	const userNetworks = $derived(Array.isArray(data?.networks) ? data.networks.filter(n => !n.builtin).map(n => ({ name: n.name, subnets: n.subnets })) : []);
 	const hostname = window.location.hostname;
 	svc.timezone().then(z => { if (alive) timezone = z; });
@@ -120,6 +121,8 @@
 	const updates = $derived(Object.fromEntries((data?.containers || []).map(c => [c.id, updateState(c, data.images, data.checks)])));
 	const outdated = $derived(allGroups.standalone.filter(c => updates[c.id] === 'available'));
 	const refs = $derived(checkRefs(data?.containers));
+	/* 反复重启、健康检查失败的容器，在容器页顶部提醒 */
+	const troubled = $derived((data?.containers || []).filter(c => troubleOf(c)));
 	const checked = $derived(lastChecked(data?.containers, data?.checks));
 
 	/* 资源占用：停在容器页时每 5 秒一次采样（一次取全部），CPU 由相邻两次相减；
@@ -180,6 +183,26 @@
 	async function updateAll(list) {
 		confirm = null;
 		try { await runTask(() => svc.updateAll(list.map(c => c.id))); }
+		catch (e) { if (alive) notice = { tone: 'error', text: errorText(e) }; }
+	}
+	/* 数据目录的问题：放在不支持的文件系统上、被新挂载的盘盖住、或在内存里 */
+	const problem = $derived(data?.reachable ? rootProblem(data.rootStatus) : '');
+	async function restartForDisk() {
+		if (locked) return;
+		busy = 'service'; notice = null;
+		try { await svc.restartService(); } catch (e) { if (alive) notice = { tone: 'error', text: errorText(e) }; }
+		finally { if (alive) { busy = ''; await load(); } }
+	}
+	/* 迁移到新数据目录（设置页保存后调用，Docker 仍在旧目录上）：由镜像 ID 创建的容器无法迁移，结果里说明 */
+	let migrateSkipped = $state([]);
+	async function migrateTo(oldRoot) {
+		migrateSkipped = [];
+		try { await runTask(async () => { const r = await svc.migrate(oldRoot); if (alive) migrateSkipped = r.skipped; return r.task; }); }
+		catch (e) { if (alive) notice = { tone: 'error', text: errorText(e) }; }
+	}
+	/* 补日志上限：按原配置批量重建 */
+	async function limitLogs(ids) {
+		try { await runTask(() => svc.limitLogs(ids)); }
 		catch (e) { if (alive) notice = { tone: 'error', text: errorText(e) }; }
 	}
 	/* 检查更新：设备端向仓库查询各镜像标签的摘要（不下载），结束后回读列表即显示哪些有新版 */
@@ -264,7 +287,7 @@
 </script>
 
 {#snippet containerContent(raw, row, colIndex)}
-	{#if colIndex === 1}<Badge tone={stateTone(row.state)}>{stateLabel(row.state)}</Badge>
+	{#if colIndex === 1}<span class="badges"><Badge tone={stateTone(row.state)}>{stateLabel(row.state)}</Badge>{#if row.health === 'unhealthy'}<Badge tone="danger" data-unhealthy>{t('Unhealthy')}</Badge>{/if}</span>
 	{:else if colIndex === 0}<span class="name"><strong>{row.name}{#if updates[row.id] === 'available'} <Badge tone="info" data-update-available>{t('Update available')}</Badge>{/if}</strong><span class="muted mono">{row.ref || row.image}</span></span>
 	{:else}{raw.text}{/if}
 {/snippet}
@@ -326,11 +349,30 @@
 				{#snippet actions()}<Button onclick={load} disabled={locked}>{t('Refresh')}</Button>{/snippet}
 			</StatusHero>
 		</Card>
-		{#if task && taskShown}<Card name="docker-task"><div data-docker-task><TaskProgress {task} {output} ondismiss={() => taskShown = false} /></div></Card>{/if}
+		{#if problem === 'unsupported'}
+			<Callout tone="danger" data-root-problem="unsupported" message={t('Docker keeps its data in %s, which is on %s. Containers cannot be created or started there. Move the data directory to a disk formatted as ext4.', data.rootStatus.root, data.rootStatus.fstype === 'overlay' ? t('the router’s internal storage') : data.rootStatus.fstype)}>
+				<Button size="compact" variant="primary" onclick={() => changeSection('settings')}>{t('Change data directory')}</Button>
+			</Callout>
+		{:else if problem === 'shadowed'}
+			<Callout tone="danger" data-root-problem="shadowed" message={t('A disk was mounted over %s while Docker was running, so Docker still uses the old location and containers fail with “blob not found”. Restart Docker to use the disk; images need to be downloaded again.', data.rootStatus.root)}>
+				<Button size="compact" variant="primary" disabled={locked} onclick={restartForDisk}>{busy === 'service' ? t('Restarting…') : t('Restart Docker')}</Button>
+			</Callout>
+		{:else if problem === 'temporary'}
+			<Callout tone="warning" data-root-problem="temporary" message={t('Docker keeps its data in memory (%s). Images and containers are lost when the router restarts.', data.rootStatus.root)}>
+				<Button size="compact" onclick={() => changeSection('settings')}>{t('Change data directory')}</Button>
+			</Callout>
+		{/if}
+		{#if task && taskShown}<Card name="docker-task"><div data-docker-task><TaskProgress {task} {output} ondismiss={() => taskShown = false} />
+			{#if task.kind === 'migrate' && migrateSkipped.length}<p class="muted" data-migrate-skipped>{t('Not moved because they were created from an image ID: %s', migrateSkipped.join(', '))}</p>{/if}</div></Card>{/if}
 
 		<div class="workspace-tabs"><Tabs id={tabsId} label={t('Docker')} items={tabs} bind:value={section} variant="underline" onchange={changeSection} /></div>
 		<div id={`${tabsId}-panel-0`} role="tabpanel" aria-labelledby={`${tabsId}-tab-0`} hidden={section !== 'containers'} tabindex="0">
 			<div class="stack">
+				{#if troubled.length}
+					<Callout tone="danger" data-trouble message={t('These containers keep restarting or fail their health check: %s. Open one to see its logs.', troubled.map(c => c.name).join(', '))}>
+						{#each troubled.slice(0, 3) as c (c.id)}<Button size="compact" onclick={() => openDetail(c)}>{c.name}</Button>{/each}
+					</Callout>
+				{/if}
 				<Card icon="container" flush>
 					<Toolbar label={t('Containers')} count={[t('%d running', data.info.running), checked ? t('Checked for updates %s', date(checked)) : ''].filter(Boolean).join(' · ')} live={false}>
 						{#snippet search()}<Input type="search" size="compact" placeholder={t('Search by name, image or port')} bind:value={query} aria-label={t('Search containers')} data-container-search />{/snippet}
@@ -374,10 +416,10 @@
 			{#if section === 'resources'}<Resources {svc} networks={data.networks} volumes={data.volumes} {locked} onreload={load} />{/if}
 		</div>
 		<div id={`${tabsId}-panel-4`} role="tabpanel" aria-labelledby={`${tabsId}-tab-4`} hidden={section !== 'storage'} tabindex="0">
-			{#if section === 'storage'}<Storage {svc} storage={data.storage} root={data.info.root} {locked} onreload={load} />{/if}
+			{#if section === 'storage'}<Storage {svc} storage={data.storage} root={data.info.root} {locked} onreload={load} onlimitlogs={limitLogs} />{/if}
 		</div>
 		<div id={`${tabsId}-panel-5`} role="tabpanel" aria-labelledby={`${tabsId}-tab-5`} hidden={section !== 'settings'} tabindex="0">
-			{#if section === 'settings'}<Settings {svc} root={data.info.root} mirrors={data.info.mirrors} onreload={load} />{/if}
+			{#if section === 'settings'}<Settings {svc} root={data.info.root} mirrors={data.info.mirrors} rootStatus={data.rootStatus} hasData={!!(data.containers.length || data.volumes?.length)} onreload={load} onmigrate={migrateTo} />{/if}
 		</div>
 
 		<Drawer error={notice?.tone === 'error' ? notice.text : ''} open={!!detail} title={detail?.name || ''} onclose={closeDetail}>
@@ -390,14 +432,14 @@
 
 		<Drawer open={creating} title={t('New container')} onclose={closeCreate}>
 			{#if creating}
-				<CreateContainer {svc} images={data.images} image={createFrom} names={data.containers.map(c => c.name)} networks={userNetworks} cpus={data.info.cpus} {timezone} pullTask={task?.kind === 'pull' ? task : null} {pull} oncancel={closeCreate} oncreated={created} />
+				<CreateContainer {svc} images={data.images} image={createFrom} names={data.containers.map(c => c.name)} networks={userNetworks} volumes={volumeNames} cpus={data.info.cpus} dataRoot={data.info.root} {timezone} pullTask={task?.kind === 'pull' ? task : null} {pull} oncancel={closeCreate} oncreated={created} />
 			{/if}
 		</Drawer>
 
 		<Drawer open={!!editing} title={editing?.name ? t('Edit %s', editing.name) : t('Edit container')} onclose={closeEdit}>
 			{#if editing === 'loading'}<Feedback tone="loading" message={t('Loading…')} />
 			{:else if editing}
-				<CreateContainer {svc} images={data.images} names={data.containers.map(c => c.name)} networks={userNetworks} cpus={data.info.cpus} {timezone} edit={editing} onedit={saveEdit} oncancel={closeEdit} />
+				<CreateContainer {svc} images={data.images} names={data.containers.map(c => c.name)} networks={userNetworks} volumes={volumeNames} cpus={data.info.cpus} dataRoot={data.info.root} {timezone} edit={editing} onedit={saveEdit} oncancel={closeEdit} />
 			{/if}
 		</Drawer>
 
@@ -421,6 +463,7 @@
 	.stack { display: flex; flex-direction: column; gap: var(--sp-4); }
 	.form { display: flex; flex-direction: column; gap: var(--sp-5); }
 	.name { display: flex; flex-direction: column; min-width: 0; }
+	.badges { display: inline-flex; flex-wrap: wrap; gap: var(--sp-1); }
 	.name strong { color: var(--heading-color); font-weight: var(--fw-semibold); }
 	.muted { margin: 0; color: var(--text-muted); font-size: var(--fs-sm); }
 	.mono { font-family: var(--font-family-monospace); font-size: var(--fs-xs); }

@@ -3,7 +3,8 @@
  * 保留 Config / HostConfig / 网络 / 标签等全部原配置，去掉与旧镜像默认值相同的部分（新镜像的默认值随之生效）；
  * 匿名卷按名称接到新容器上，数据不丢。编辑时只替换表单负责的字段，其余原样保留。
  */
-import { splitCommand, createImage, parseDevice, deviceText, ownNetwork, isCustomNetwork } from './service.js';
+import { splitCommand, createImage, parseDevice, deviceText, ownNetwork, isCustomNetwork, logOf, logConfig, isAnonymousVolume, normalizeCap,
+	memoryBytes, nanoCpus, deviceList, capList } from './service.js';
 
 const clone = v => v === undefined ? undefined : JSON.parse(JSON.stringify(v));
 const same = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
@@ -113,6 +114,8 @@ export function limitsOf(body) {
 		cpus: cpus ? decimal(cpus) : '',
 		devices: (host.Devices || []).map(deviceText),
 		ip: isCustomNetwork(network) ? body?.NetworkingConfig?.EndpointsConfig?.[network]?.IPAMConfig?.IPv4Address || '' : '',
+		log: logOf(host.LogConfig),
+		caps: (host.CapAdd || []).map(normalizeCap),
 	};
 }
 
@@ -127,7 +130,8 @@ export function formFromInspect(c, base) {
 		const [container, proto = 'tcp'] = key.split('/');
 		for (const b of list || []) if (b?.HostPort) ports.push({ host: b.HostPort, container, proto, ip: b.HostIp || '' });
 	}
-	const mounts = (host.Binds || []).map(parseBind).filter(b => b.source.startsWith('/'))
+	/* 设备目录与命名卷进表单；匿名卷不进 */
+	const mounts = (host.Binds || []).map(parseBind).filter(b => !isAnonymousVolume(b.source))
 		.map(b => ({ host: b.source, container: b.target, readonly: b.options.includes('ro'), options: b.options.filter(o => o !== 'ro' && o !== 'rw') }));
 	return {
 		source: 'local', image: c?.Config?.Image || '', pullRef: '', name: base.name,
@@ -179,11 +183,12 @@ export function buildEdit(base, form) {
 	/* 主机名与资源限制：只写改动过的；改内存时交还 Docker 决定交换区上限，避免与旧值冲突 */
 	const hostname = ownNetwork(form.network) ? String(form.hostname || '').trim() : '';
 	if (hostname !== was.hostname) { if (hostname) body.Hostname = hostname; else delete body.Hostname; }
-	const memory = String(form.memory ?? '').trim(), cpus = String(form.cpus ?? '').trim();
-	if (memory !== was.memory) { host.Memory = memory ? +memory * 1048576 : 0; host.MemorySwap = 0; }
-	if (cpus !== was.cpus) { host.NanoCpus = cpus ? Math.round(+cpus * 1e9) : 0; host.CpuQuota = 0; host.CpuPeriod = 0; }
-	const devices = (form.devices || []).map(d => String(d).trim()).filter(Boolean);
+	if (String(form.memory ?? '').trim() !== was.memory) { host.Memory = memoryBytes(form.memory); host.MemorySwap = 0; }
+	if (String(form.cpus ?? '').trim() !== was.cpus) { host.NanoCpus = nanoCpus(form.cpus); host.CpuQuota = 0; host.CpuPeriod = 0; }
+	const devices = deviceList(form.devices), caps = capList(form.caps);
 	if (JSON.stringify(devices) !== JSON.stringify(was.devices)) host.Devices = devices.map(parseDevice);
+	if (JSON.stringify(caps) !== JSON.stringify(was.caps)) host.CapAdd = caps.length ? caps : null;
+	if (form.log !== was.log && form.log !== 'custom') host.LogConfig = logConfig(form.log);
 
 	/* 端口：未写设备端口的映射（随机端口）不由表单管理，保留 */
 	const bindings = {}, oldKeys = new Set();
@@ -200,10 +205,10 @@ export function buildEdit(base, form) {
 	for (const key of Object.keys(host.PortBindings)) exposed[key] = {};
 	if (Object.keys(exposed).length) body.ExposedPorts = exposed; else delete body.ExposedPorts;
 
-	/* 目录：设备目录由表单替换；卷挂载保留，挂载点与表单目录重复的让位 */
+	/* 目录：设备目录与命名卷由表单替换；匿名卷保留，挂载点与表单重复的让位 */
 	const dirs = form.mounts.filter(filled).map(m => ({ source: m.host.trim(), target: m.container.trim(), options: [...(m.readonly ? ['ro'] : []), ...(m.options || [])] }));
 	const targets = new Set(dirs.map(d => d.target));
-	const binds = (host.Binds || []).map(parseBind).filter(b => !b.source.startsWith('/') && !targets.has(b.target));
+	const binds = (host.Binds || []).map(parseBind).filter(b => isAnonymousVolume(b.source) && !targets.has(b.target));
 	const all = [...binds, ...dirs].map(joinBind);
 	host.Binds = all.length ? all : null;
 	return body;
