@@ -31,12 +31,11 @@
 			"id": "docker",
 			"package": "sight-app-docker",
 			"title": "Docker",
-			"description": "Run containers on the router: create, edit, update and open them, use a terminal, run Compose projects, manage images, networks and volumes, and set a registry mirror.",
+			"description": "Run containers on the router: create, edit and open them, see their CPU and memory use, check for and apply image updates, use a terminal, run Compose projects, manage images, networks, volumes and storage, and set a registry mirror.",
 			"icon": "container",
 			"locales": {
 				"zh": {
-					"title": "Docker",
-					"description": "在路由器上运行容器：新建、编辑、更新与打开容器，使用终端，运行 Compose 项目，管理镜像、网络与卷，设置镜像加速。"
+					"title": "Docker"
 				}
 			}
 		},
