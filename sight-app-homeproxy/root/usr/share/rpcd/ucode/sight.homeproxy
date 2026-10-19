@@ -3,112 +3,140 @@
  * SPDX-License-Identifier: GPL-2.0-only
  *
  * Copyright (C) 2023-2024 ImmortalWrt.org
+ *
+ * HomeProxy 的 Sight 页面接口（rpcd 对象 sight.homeproxy）。
+ * 前半部分移植自上游 luci-app-homeproxy 的 luci.homeproxy，保留原方法名与 { result, error } 返回形态便于比对；
+ * 后半部分是 Sight 增加的方法，失败按 docs/rpc.md 用状态码结束（fail(req, STATUS.*)）。
  */
 
 'use strict';
 
-import { access, error, lsdir, lstat, mkdir, popen, readfile, rmdir, writefile } from 'fs';
+import { access, lsdir, lstat, mkdir, popen, readfile, rename, rmdir, unlink, writefile } from 'fs';
 import * as socket from 'socket';
 import { connect } from 'ubus';
 import { cursor } from 'uci';
 import { STATUS, fail, shellquote } from 'sight.rpc';
 
-function hasKernelModule(kmod) {
-	return (system(sprintf('[ -e "/lib/modules/$(uname -r)"/%s ]', shellquote(kmod))) === 0);
-}
-
 const HP_DIR = '/etc/homeproxy';
 const RUN_DIR = '/var/run/homeproxy';
+/* 规则库类型，与 scripts/update_resources.sh 一致 */
+const RESOURCE_TYPES = ['china_ip4', 'china_ip6', 'china_list', 'gfw_list'];
+const ACL_LISTS = ['direct_list', 'proxy_list'];
+const LOG_TYPES = ['homeproxy', 'sing-box-c', 'sing-box-s'];
 
 /* 节点延迟：只走 UDP 的协议连 TCP 端口没有意义，交给页面另行处理 */
 const UDP_TYPES = ['hysteria', 'hysteria2', 'tuic', 'wireguard'];
 const LATENCY_MAX_NODES = 128, LATENCY_TIMEOUT = 3000;
-const ECONNREFUSED = 111;
 
 /* sing-box 核心的检查与更新：apk 联网可能超过 rpcd 调用超时，交给后台任务，页面轮询 core_task */
 const CORE_DIR = '/tmp/sight-homeproxy';
 const CORE_TASK = CORE_DIR + '/core.json', CORE_LOG = CORE_DIR + '/core.log', CORE_LOCK = CORE_DIR + '/start.lock';
 const CORE_RUNNER = '/usr/libexec/sight-homeproxy-core';
 const CORE_OUTPUT_LIMIT = 8192;
+/* 后台进程写入自己的 pid 之前，按开始时间判断它是否还在启动中 */
+const SPAWN_GRACE = 30;
+/* 系统日志里保留的 sing-box 报错条数 */
+const ERROR_LINES = 5;
 /* /proc/<pid>/stat 的时间单位；OpenWrt 内核均为 100 */
 const CLK_TCK = 100;
+
+function has_kernel_module(kmod) {
+	return (system(sprintf('[ -e "/lib/modules/$(uname -r)"/%s ]', shellquote(kmod))) === 0);
+}
+
+/* 上游的文本规整：去首尾空白、CRLF 转 LF、保证以换行结尾 */
+function normalize_text(s) {
+	s = replace(trim(s), /\r\n?/g, '\n');
+	return match(s, /\n$/) ? s : s + '\n';
+}
+
+/* 逐行读取命令输出 */
+function each_line(cmd, fn) {
+	const fd = popen(cmd);
+	if (!fd)
+		return;
+	for (let line = fd.read('line'); length(line); line = fd.read('line'))
+		fn(rtrim(line, '\n'));
+	fd.close();
+}
 
 function read_json(path) {
 	try { return json(readfile(path) || ''); } catch { return null; }
 }
+/* 先写临时文件再改名，读取方不会看到写了一半的内容 */
+function write_json(path, value) {
+	writefile(path + '.tmp', sprintf('%J', value));
+	rename(path + '.tmp', path);
+}
+
 /* /proc/<pid>/stat 中进程名之后的字段：[0] 状态、[1] 父进程、[19] 启动时刻（开机后的时钟滴答数） */
 function stat_fields(pid) {
 	const stat = readfile(`/proc/${pid}/stat`);
 	const end = stat ? rindex(stat, ')') : -1;
 	return end < 0 ? null : split(trim(substr(stat, end + 1)), ' ');
 }
-/* 后台任务的状态；进程已不在（被杀、异常退出）却仍标着 running 时改记为失败 */
+
+/* 后台任务的状态；进程已不在（没能启动、被杀、异常退出）却仍标着 running 时改记为失败 */
 function core_task_state() {
 	const t = read_json(CORE_TASK);
-	if (t?.state === 'running' && t.pid && !access(`/proc/${t.pid}`)) {
-		t.state = 'failed';
-		t.code = -1;
+	if (t?.state === 'running') {
+		const alive = t.pid ? access(`/proc/${t.pid}`) : time() - (t.started || 0) < SPAWN_GRACE;
+		if (!alive) {
+			t.state = 'failed';
+			t.code = -1;
+			t.error = t.pid ? 'exited' : 'not started';
+		}
 	}
 	return t;
 }
 
-function monotonicMs() {
+function monotonic_ms() {
 	const c = clock(true);
 	return c[0] * 1000 + c[1] / 1000000;
 }
 
+/* errno 数值因架构而异（MIPS 与 x86/ARM 不同），按 libc 的文案识别 */
+const in_progress = () => socket.strerror(socket.error(true)) === 'Operation in progress';
+const is_refused = (err) => socket.strerror(err) === 'Connection refused';
+
 const methods = {
+	/* ---- 移植自上游 luci.homeproxy ---- */
+
 	acllist_read: {
 		args: { type: 'type' },
 		call: function(req) {
-			if (index(['direct_list', 'proxy_list'], req.args?.type) === -1)
+			if (!(req.args?.type in ACL_LISTS))
 				return { content: null, error: 'illegal type' };
 
-			const filecontent = readfile(`${HP_DIR}/resources/${req.args?.type}.txt`);
-			return { content: filecontent };
+			return { content: readfile(`${HP_DIR}/resources/${req.args.type}.txt`) };
 		}
 	},
 	acllist_write: {
 		args: { type: 'type', content: 'content' },
 		call: function(req) {
-			if (index(['direct_list', 'proxy_list'], req.args?.type) === -1)
+			if (!(req.args?.type in ACL_LISTS))
 				return { result: false, error: 'illegal type' };
 
-			const file = `${HP_DIR}/resources/${req.args?.type}.txt`;
-			let content = req.args?.content;
-
-			/* Sanitize content */
-			if (content) {
-				content = trim(content);
-				content = replace(content, /\r\n?/g, '\n');
-				if (!match(content, /\n$/))
-					content += '\n';
-			}
-
-			system(`mkdir -p ${HP_DIR}/resources`);
-			writefile(file, content);
-
-			return { result: true };
+			const content = req.args.content ? normalize_text(req.args.content) : req.args.content;
+			mkdir(`${HP_DIR}/resources`);
+			return { result: writefile(`${HP_DIR}/resources/${req.args.type}.txt`, content) != null };
 		}
 	},
 
+	/* 服务端证书上传。Sight 页面不含服务端，未在 ACL 放行；保留以便与上游比对 */
 	certificate_write: {
 		args: { filename: 'filename' },
 		call: function(req) {
+			const tmpcert = '/tmp/homeproxy_certificate.tmp';
+			const reject = (error) => { unlink(tmpcert); return { result: false, error }; };
 			const writeCertificate = (filename, priv) => {
-				const tmpcert = '/tmp/homeproxy_certificate.tmp';
 				const filestat = lstat(tmpcert);
-
-				if (!filestat || filestat.type !== 'file' || filestat.size <= 0) {
-					system(`rm -f ${tmpcert}`);
-					return { result: false, error: 'empty certificate file' };
-				}
+				if (!filestat || filestat.type !== 'file' || filestat.size <= 0)
+					return reject('empty certificate file');
 
 				let filecontent = readfile(tmpcert);
-				if (is_binary(filecontent)) {
-					system(`rm -f ${tmpcert}`);
-					return { result: false, error: 'illegal file type: binary' };
-				}
+				if (is_binary(filecontent))
+					return reject('illegal file type: binary');
 
 				/* Kanged from luci-proto-openconnect */
 				const beg = priv ? /^-----BEGIN (RSA|EC) PRIVATE KEY-----$/ : /^-----BEGIN CERTIFICATE-----$/,
@@ -123,39 +151,141 @@ const methods = {
 						break;
 				}
 
-				if (!start || i < length(lines) - 1 || !match(lines[i], end)) {
-					system(`rm -f ${tmpcert}`);
-					return { result: false, error: 'this does not look like a correct PEM file' };
-				}
+				if (!start || i < length(lines) - 1 || !match(lines[i], end))
+					return reject('this does not look like a correct PEM file');
 
-				/* Sanitize certificate */
-				filecontent = trim(filecontent);
-				filecontent = replace(filecontent, /\r\n?/g, '\n');
-				if (!match(filecontent, /\n$/))
-					filecontent += '\n';
-
-				system(`mkdir -p ${HP_DIR}/certs`);
-				writefile(`${HP_DIR}/certs/${filename}.pem`, filecontent);
-				system(`rm -f ${tmpcert}`);
+				mkdir(`${HP_DIR}/certs`);
+				writefile(`${HP_DIR}/certs/${filename}.pem`, normalize_text(filecontent));
+				unlink(tmpcert);
 
 				return { result: true };
 			};
 
-			const filename = req.args?.filename;
-			switch (filename) {
+			switch (req.args?.filename) {
 			case 'client_ca':
 			case 'server_publickey':
-				return writeCertificate(filename, false);
-				break;
+				return writeCertificate(req.args.filename, false);
 			case 'server_privatekey':
-				return writeCertificate(filename, true);
-				break;
+				return writeCertificate(req.args.filename, true);
 			default:
-				return { result: false, error: 'illegal cerificate filename' };
-				break;
+				return { result: false, error: 'illegal certificate filename' };
 			}
 		}
 	},
+
+	connection_check: {
+		args: { site: 'site' },
+		call: function(req) {
+			const url = { baidu: 'https://www.baidu.com', google: 'https://www.google.com' }[req.args?.site];
+			if (!url)
+				return { result: false, error: 'illegal site' };
+
+			return { result: (system(`/usr/bin/wget --spider -qT3 ${url} 2>"/dev/null"`, 3100) === 0) };
+		}
+	},
+
+	log_clean: {
+		args: { type: 'type' },
+		call: function(req) {
+			if (!(req.args?.type in LOG_TYPES))
+				return { result: false, error: 'illegal type' };
+
+			const file = `${RUN_DIR}/${req.args.type}.log`;
+			if (lstat(file))
+				writefile(file, '');
+			return { result: true };
+		}
+	},
+
+	/* 生成密钥对等。Sight 页面未使用，未在 ACL 放行；保留以便与上游比对 */
+	singbox_generator: {
+		args: { type: 'type', params: 'params' },
+		call: function(req) {
+			const type = req.args?.type;
+			if (!(type in ['ech-keypair', 'uuid', 'reality-keypair', 'vapid-keypair', 'wg-keypair']))
+				return { result: false, error: 'illegal type' };
+
+			const result = {};
+			let ech_cfg_set = false, ech_key_set = false;
+			each_line(`/usr/bin/sing-box generate ${type} ${shellquote(req.args?.params || '')}`, (raw) => {
+				const line = trim(raw);
+				if (type === 'uuid')
+					result.uuid = line;
+				else if (type in ['reality-keypair', 'vapid-keypair', 'wg-keypair']) {
+					const priv = match(line, /PrivateKey: (.*)/);
+					if (priv)
+						result.private_key = priv[1];
+					const pub = match(line, /PublicKey: (.*)/);
+					if (pub)
+						result.public_key = pub[1];
+				} else {
+					if (line === '-----BEGIN ECH CONFIGS-----')
+						ech_cfg_set = true;
+					else if (line === '-----BEGIN ECH KEYS-----')
+						ech_key_set = true;
+
+					if (ech_cfg_set)
+						result.ech_cfg = result.ech_cfg ? result.ech_cfg + '\n' + line : line;
+					if (ech_key_set)
+						result.ech_key = result.ech_key ? result.ech_key + '\n' + line : line;
+
+					if (line === '-----END ECH CONFIGS-----')
+						ech_cfg_set = false;
+					else if (line === '-----END ECH KEYS-----')
+						ech_key_set = false;
+				}
+			});
+
+			return { result };
+		}
+	},
+
+	singbox_get_features: {
+		call: function() {
+			const features = {};
+			each_line('/usr/bin/sing-box version', (raw) => {
+				const line = trim(raw);
+				const version = match(line, /^sing-box version (.*)/);
+				if (version)
+					features.version = version[1];
+
+				const tags = match(line, /^Tags: (.*)/);
+				if (tags)
+					for (let tag in split(tags[1], ','))
+						features[tag] = true;
+			});
+
+			features.hp_has_ip_full = access('/usr/libexec/ip-full');
+			features.hp_has_tcp_brutal = has_kernel_module('brutal.ko');
+			features.hp_has_tproxy = has_kernel_module('nft_tproxy.ko') || access('/etc/modules.d/nft-tproxy');
+			features.hp_has_tun = has_kernel_module('tun.ko') || access('/etc/modules.d/30-tun');
+
+			return features;
+		}
+	},
+
+	/* 规则库版本：文件不存在时 version 为 null（上游返回体去掉了残留的 error 字段） */
+	resources_get_version: {
+		args: { type: 'type' },
+		call: function(req) {
+			if (!(req.args?.type in RESOURCE_TYPES))
+				return fail(req, STATUS.INVALID_ARGUMENT);
+
+			const version = readfile(`${HP_DIR}/resources/${req.args.type}.ver`);
+			return { version: version ? trim(version) : null };
+		}
+	},
+	resources_update: {
+		args: { type: 'type' },
+		call: function(req) {
+			if (!(req.args?.type in RESOURCE_TYPES))
+				return { status: 255, error: 'illegal type' };
+
+			return { status: system(`${HP_DIR}/scripts/update_resources.sh ${shellquote(req.args.type)}`) };
+		}
+	},
+
+	/* ---- 以下为 Sight 增加的方法 ---- */
 
 	/*
 	 * sing-box 运行期的致命错误（启动后退出）由 procd 记进系统日志，不在 sing-box-c.log 里：
@@ -164,23 +294,21 @@ const methods = {
 	client_errors: {
 		call: function() {
 			const lines = [];
-			const fd = popen("logread -e 'sing-box' 2>/dev/null");
-			if (fd) {
-				for (let line = fd.read('line'); length(line); line = fd.read('line')) {
-					line = rtrim(line, '\n');
-					if ((match(line, / sing-box\[\d+\]: /) && index(line, 'FATAL') !== -1) || index(line, 'homeproxy::sing-box-c') !== -1) {
-						push(lines, line);
-						if (length(lines) > 5)
-							shift(lines);
-					}
+			each_line("logread -e 'sing-box' 2>/dev/null", (line) => {
+				if ((match(line, / sing-box\[\d+\]: /) && index(line, 'FATAL') !== -1) || index(line, 'homeproxy::sing-box-c') !== -1) {
+					push(lines, line);
+					if (length(lines) > ERROR_LINES)
+						shift(lines);
 				}
-				fd.close();
-			}
+			});
 			return { lines };
 		}
 	},
 
-	/* sing-box 客户端进程的运行时长与内存。开启 ujail 时 procd 记录的是 ujail，sing-box 是它的子进程 */
+	/*
+	 * sing-box 客户端进程的运行时长与内存。开启 ujail 时 procd 记录的是 ujail，sing-box 是它的子进程；
+	 * 找不到子进程时不拿 ujail 的数据冒充
+	 */
 	client_status: {
 		call: function() {
 			const ubus = connect();
@@ -189,13 +317,16 @@ const methods = {
 			if (!inst?.running || !inst.pid)
 				return { running: false };
 
-			let pid = inst.pid;
-			if (trim(readfile(`/proc/${pid}/comm`) || '') !== 'sing-box')
+			const is_singbox = (p) => trim(readfile(`/proc/${p}/comm`) || '') === 'sing-box';
+			let pid = is_singbox(inst.pid) ? inst.pid : null;
+			if (!pid)
 				for (let p in lsdir('/proc') || [])
-					if (match(p, /^\d+$/) && stat_fields(p)?.[1] == `${pid}` && trim(readfile(`/proc/${p}/comm`) || '') === 'sing-box') {
+					if (match(p, /^\d+$/) && stat_fields(p)?.[1] == `${inst.pid}` && is_singbox(p)) {
 						pid = int(p);
 						break;
 					}
+			if (!pid)
+				return { running: true, uptime: null, memory: null };
 
 			const start = stat_fields(pid)?.[19];
 			const boot = +split(readfile('/proc/uptime') || '', ' ')[0];
@@ -219,7 +350,7 @@ const methods = {
 		}
 	},
 
-	/* 开始检查（check）或更新（upgrade）sing-box；已有任务在进行时不另起，返回进行中的任务 */
+	/* 开始检查（check）或更新（upgrade）sing-box；已有任务在进行时不另起，返回进行中的任务并标 started: false */
 	core_start: {
 		args: { action: 'action' },
 		call: function(req) {
@@ -229,61 +360,29 @@ const methods = {
 			if (!access('/usr/bin/apk'))
 				return fail(req, STATUS.NOT_SUPPORTED);
 
-			mkdir(CORE_DIR);
+			mkdir(CORE_DIR, 0o700);
 			if (!mkdir(CORE_LOCK))
-				return { task: core_task_state() };
+				return { task: core_task_state(), started: false };
 			const current = core_task_state();
 			if (current?.state === 'running') {
 				rmdir(CORE_LOCK);
-				return { task: current };
+				return { task: current, started: false };
 			}
 			const t = { action, state: 'running', started: time() };
-			writefile(CORE_TASK, sprintf('%J', t));
+			write_json(CORE_TASK, t);
 			writefile(CORE_LOG, '');
 			system(`${CORE_RUNNER} ${action} ${t.started} </dev/null >>${CORE_LOG} 2>&1 &`);
 			rmdir(CORE_LOCK);
-			return { task: t };
-		}
-	},
-
-	connection_check: {
-		args: { site: 'site' },
-		call: function(req) {
-			let url;
-			switch(req.args?.site) {
-			case 'baidu':
-				url = 'https://www.baidu.com';
-				break;
-			case 'google':
-				url = 'https://www.google.com';
-				break;
-			default:
-				return { result: false, error: 'illegal site' };
-				break;
-			}
-
-			return { result: (system(`/usr/bin/wget --spider -qT3 ${url} 2>"/dev/null"`, 3100) === 0) };
-		}
-	},
-
-	log_clean: {
-		args: { type: 'type' },
-		call: function(req) {
-			if (!(req.args?.type in ['homeproxy', 'sing-box-c', 'sing-box-s']))
-				return { result: false, error: 'illegal type' };
-
-			const filestat = lstat(`${RUN_DIR}/${req.args?.type}.log`);
-			if (filestat)
-				writefile(`${RUN_DIR}/${req.args?.type}.log`, '');
-			return { result: true };
+			return { task: t, started: true };
 		}
 	},
 
 	/*
-	 * 路由器到各节点服务器端口的 TCP 握手耗时（不经代理）：先逐个解析地址，再一起非阻塞 connect，
-	 * 最多等 LATENCY_TIMEOUT。结果为毫秒，或 'timeout' / 'refused' / 'unresolved' / 'udp' / 'error'。
+	 * 路由器到各节点服务器端口的 TCP 握手耗时（不经代理）：先逐个解析地址（与 sing-box 一样优先 IPv4），
+	 * 再一起非阻塞 connect，最多等 LATENCY_TIMEOUT。结果为毫秒，或 'timeout' / 'refused' / 'unresolved' / 'udp' / 'error'。
 	 * 连接打上 infra.self_mark，与 sing-box 自己的连接一样绕过本机防火墙：否则代理开着时，发往常用端口的
-	 * 连接会被 output 链转进本机 sing-box，测到的是本机端口
+	 * 连接会被 output 链转进本机 sing-box，测到的是本机端口。
+	 * 域名解析是同步的，上游 DNS 无响应时整次调用会变慢；页面按批调用以控制规模
 	 */
 	node_latency: {
 		args: { nodes: [] },
@@ -293,26 +392,29 @@ const methods = {
 				return fail(req, STATUS.INVALID_ARGUMENT);
 
 			const uci = cursor();
-			const results = {}, targets = [];
 			const self_mark = uci.get('homeproxy', 'infra', 'self_mark') || '100';
 			const mark = match(self_mark, /^0x/i) ? int(substr(self_mark, 2), 16) : int(self_mark);
+			const results = {}, targets = [], seen = {};
 			for (let id in ids) {
-				if (type(id) !== 'string' || id in results)
+				if (type(id) !== 'string' || seen[id])
 					continue;
+				seen[id] = true;
 				const node = uci.get_all('homeproxy', id);
 				if (node?.['.type'] !== 'node') {
 					results[id] = 'error';
 					continue;
 				}
-				const port = int(node.port);
+				const port = match(node.port, /^\d+$/) ? int(node.port) : 0;
 				if (node.type in UDP_TYPES || node.transport === 'quic')
 					results[id] = 'udp';
 				else if (!node.address || !(port >= 1 && port <= 65535))
 					results[id] = 'error';
 				else {
-					const ai = socket.addrinfo(replace(node.address, /^\[|\]$/g, ''), `${port}`, { socktype: socket.SOCK_STREAM });
-					if (ai?.[0])
-						push(targets, { id, ai: ai[0] });
+					const host = replace(node.address, /^\[|\]$/g, '');
+					const ai = socket.addrinfo(host, `${port}`, { socktype: socket.SOCK_STREAM, flags: socket.AI_ADDRCONFIG }) || [];
+					const pick = filter(ai, a => a.family === socket.AF_INET)[0] || ai[0];
+					if (pick)
+						push(targets, { id, ai: pick });
 					else
 						results[id] = 'unresolved';
 				}
@@ -321,12 +423,13 @@ const methods = {
 			const pending = [];
 			for (let t in targets) {
 				const sock = socket.create(t.ai.family, socket.SOCK_STREAM | socket.SOCK_NONBLOCK);
-				if (sock && mark)
-					sock.setopt(socket.SOL_SOCKET, socket.SO_MARK, mark);
-				const start = monotonicMs();
-				if (!sock)
+				if (!sock || (mark && !sock.setopt(socket.SOL_SOCKET, socket.SO_MARK, mark))) {
 					results[t.id] = 'error';
-				else if (sock.connect(t.ai.addr) || socket.error(true) === 115 /* EINPROGRESS */)
+					sock?.close();
+					continue;
+				}
+				const start = monotonic_ms();
+				if (sock.connect(t.ai.addr) || in_progress())
 					push(pending, { id: t.id, sock, start });
 				else {
 					results[t.id] = 'error';
@@ -334,17 +437,17 @@ const methods = {
 				}
 			}
 
-			const deadline = monotonicMs() + LATENCY_TIMEOUT;
-			while (length(pending) && monotonicMs() < deadline) {
-				const ready = socket.poll(max(1, int(deadline - monotonicMs())), ...map(pending, p => [p.sock, socket.POLLOUT]));
-				const now = monotonicMs();
+			const deadline = monotonic_ms() + LATENCY_TIMEOUT;
+			while (length(pending) && monotonic_ms() < deadline) {
+				const ready = socket.poll(max(1, int(deadline - monotonic_ms())), ...map(pending, p => [p.sock, socket.POLLOUT]));
+				const now = monotonic_ms();
 				for (let r in ready) {
 					if (!(r[1] & (socket.POLLOUT | socket.POLLERR | socket.POLLHUP)))
 						continue;
 					for (let p in pending)
 						if (p.sock === r[0] && !p.done) {
 							const err = p.sock.getopt(socket.SOL_SOCKET, socket.SO_ERROR);
-							results[p.id] = err ? (err === ECONNREFUSED ? 'refused' : 'error') : max(1, int(now - p.start + 0.5));
+							results[p.id] = err ? (is_refused(err) ? 'refused' : 'error') : max(1, int(now - p.start + 0.5));
 							p.sock.close();
 							p.done = true;
 						}
@@ -359,102 +462,6 @@ const methods = {
 			}
 
 			return { results };
-		}
-	},
-
-	singbox_generator: {
-		args: { type: 'type', params: 'params' },
-		call: function(req) {
-			if (!(req.args?.type in ['ech-keypair', 'uuid', 'reality-keypair', 'vapid-keypair', 'wg-keypair']))
-				return { result: false, error: 'illegal type' };
-
-			const type = req.args?.type;
-			let result = {};
-
-			const fd = popen(`/usr/bin/sing-box generate ${type} ${shellquote(req.args?.params || '')}`);
-			if (fd) {
-				let ech_cfg_set = false;
-				let ech_key_set = false;
-
-				for (let line = fd.read('line'); length(line); line = fd.read('line')) {
-					if (type === 'uuid')
-						result.uuid = trim(line);
-					else if (type in ['reality-keypair', 'vapid-keypair', 'wg-keypair']) {
-						let priv = match(trim(line), /PrivateKey: (.*)/);
-						if (priv)
-							result.private_key = priv[1];
-						let pub = match(trim(line), /PublicKey: (.*)/);
-						if (pub)
-							result.public_key = pub[1];
-					} else if (type in ['ech-keypair']) {
-						if (trim(line) === '-----BEGIN ECH CONFIGS-----')
-							ech_cfg_set = true;
-						else if (trim(line) === '-----BEGIN ECH KEYS-----')
-							ech_key_set = true;
-
-						if (ech_cfg_set)
-							result.ech_cfg = result.ech_cfg ? result.ech_cfg + '\n' + trim(line) : trim(line) ;
-						if (ech_key_set)
-							result.ech_key = result.ech_key ? result.ech_key + '\n' + trim(line) : trim(line) ;
-
-						if (trim(line) === '-----END ECH CONFIGS-----')
-							ech_cfg_set = false;
-						else if (trim(line) === '-----END ECH KEYS-----')
-							ech_key_set = false;
-					}
-				}
-
-				fd.close();
-			}
-
-			return { result };
-		}
-	},
-
-	singbox_get_features: {
-		call: function() {
-			let features = {};
-
-			const fd = popen('/usr/bin/sing-box version');
-			if (fd) {
-				for (let line = fd.read('line'); length(line); line = fd.read('line')) {
-					if (match(trim(line), /^sing-box version (.*)/))
-						features.version = match(trim(line), /^sing-box version (.*)/)[1];
-
-					let tags = match(trim(line), /^Tags: (.*)/);
-					if (tags)
-						for (let i in split(tags[1], ','))
-							features[i] = true;
-				}
-
-				fd.close();
-			}
-
-			features.hp_has_ip_full = access('/usr/libexec/ip-full');
-			features.hp_has_tcp_brutal = hasKernelModule('brutal.ko');
-			features.hp_has_tproxy = hasKernelModule('nft_tproxy.ko') || access('/etc/modules.d/nft-tproxy');
-			features.hp_has_tun = hasKernelModule('tun.ko') || access('/etc/modules.d/30-tun');
-
-			return features;
-		}
-	},
-
-	resources_get_version: {
-		args: { type: 'type' },
-		call: function(req) {
-			const version = trim(readfile(`${HP_DIR}/resources/${req.args?.type}.ver`));
-			return { version: version, error: error() };
-		}
-	},
-	resources_update: {
-		args: { type: 'type' },
-		call: function(req) {
-			if (req.args?.type) {
-				const type = shellquote(req.args?.type);
-				const exit_code = system(`${HP_DIR}/scripts/update_resources.sh ${type}`);
-				return { status: exit_code };
-			} else
-				return { status: 255, error: 'illegal type' };
 		}
 	}
 };

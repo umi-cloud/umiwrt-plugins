@@ -1,33 +1,44 @@
 #!/bin/sh
 # 由 sight.homeproxy 的 core_start 在后台启动：检查或更新 sing-box，结果写回 /tmp/sight-homeproxy/core.json
-# 参数：动作（check | upgrade） 开始时间
+# 参数：动作（check | upgrade） 开始时间（Unix 秒）
 DIR=/tmp/sight-homeproxy
 action="$1" started="$2"
+case "$started" in ''|*[!0-9]*) started=0 ;; esac
 
+# 结果文件是手工拼的 JSON：写进去的值只保留版本号允许的字符，避免 apk 输出里的引号破坏文件
+clean() {
+	printf '%s' "$1" | tr -cd 'A-Za-z0-9._~+-'
+}
 state() {
 	printf '{"action":"%s","state":"%s","started":%s,"pid":%s%s}\n' \
 		"$action" "$1" "$started" "$$" "$2" > "$DIR/core.json.tmp"
 	mv "$DIR/core.json.tmp" "$DIR/core.json"
 }
 installed() {
-	apk query --installed --network=no --format json --fields version sing-box 2>/dev/null | jsonfilter -e '@[0].version'
+	clean "$(apk query --installed --network=no --format json --fields version sing-box 2>/dev/null | jsonfilter -e '@[0].version')"
 }
 client_running() {
 	[ "$(ubus call service list '{"name":"homeproxy"}' 2>/dev/null | jsonfilter -e '@.homeproxy.instances["sing-box-c"].running')" = "true" ]
 }
+# 被中止时也留下结果，页面不会一直显示进行中
+trap 'state failed ",\"code\":143,\"finished\":$(date +%s)"; exit 143' TERM INT
 
 state running ""
 current="$(installed)"
 case "$action" in
 	check)
+		# 刷新索引；个别软件源失败（如插件源暂时访问不到）不算检查失败，只要能算出结果
 		apk update
-		rc=$?
+		update_rc=$?
 		# 有新版时模拟升级会输出 "Upgrading sing-box (旧 -> 新)"
-		latest="$(apk upgrade --simulate --network=no sing-box 2>/dev/null | sed -n 's/.*Upgrading sing-box (.* -> \([^)]*\)).*/\1/p' | head -n 1)"
-		extra=",\"current\":\"$current\",\"latest\":\"$latest\""
+		simulate="$(apk upgrade --simulate --network=no sing-box 2>/dev/null)"
+		simulate_rc=$?
+		latest="$(clean "$(printf '%s\n' "$simulate" | sed -n 's/.*Upgrading sing-box (.* -> \([^)]*\)).*/\1/p' | head -n 1)")"
+		if [ "$simulate_rc" -eq 0 ]; then rc=0; else rc=$update_rc; fi
+		extra=",\"current\":\"$current\",\"latest\":\"$latest\",\"update_code\":$update_rc"
 		;;
 	upgrade)
-		# 代理在运行时，装好新版后重启，让新版本生效
+		# 代理在运行时，装好新版后重启，让新版本生效；重启失败（新版与配置不兼容等）整体记为失败
 		was_running=0
 		client_running && was_running=1
 		apk upgrade -U sing-box
@@ -35,8 +46,11 @@ case "$action" in
 		now="$(installed)"
 		restarted=false
 		if [ "$rc" -eq 0 ] && [ "$now" != "$current" ] && [ "$was_running" = 1 ]; then
-			/etc/init.d/homeproxy restart
-			restarted=true
+			if /etc/init.d/homeproxy restart; then
+				restarted=true
+			else
+				rc=1
+			fi
 		fi
 		extra=",\"from\":\"$current\",\"current\":\"$now\",\"restarted\":$restarted"
 		;;

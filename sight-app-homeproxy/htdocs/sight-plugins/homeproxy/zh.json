@@ -359,7 +359,6 @@
 	"Nodes to keep": "保留哪些节点",
 	"Applied by name each time subscriptions are updated.": "每次更新订阅时按节点名称过滤。",
 	"Keywords": "关键字",
-	"Regular expressions are allowed, for example 到期|剩余 or ^HK.": "支持正则表达式，例如 到期|剩余 或 ^HK。",
 	"With these settings, %d of the %d current subscription nodes would be skipped.": "按此设置，当前订阅节点中有 %d 个会被跳过（共 %d 个）。",
 	"Some providers return different formats depending on the client name.": "部分服务商按客户端名称返回不同格式。",
 	"Takes effect at the next subscription update.": "下次更新订阅时生效。",
@@ -546,5 +545,14 @@
 	"Routing": "分流",
 	"DNS": "DNS",
 	"UDP traffic, ports and IPv6": "UDP 流量、走代理的端口与 IPv6",
-	"Traffic from the device that goes through the proxy is not limited to the ports set under Routing. Use it for games and apps on unusual ports.": "该设备走代理的流量不受「分流」里端口设置的限制，适合游戏和使用非常用端口的应用。"
+	"Traffic from the device that goes through the proxy is not limited to the ports set under Routing. Use it for games and apps on unusual ports.": "该设备走代理的流量不受「分流」里端口设置的限制，适合游戏和使用非常用端口的应用。",
+	"Regular expressions are allowed, for example %s or %s.": "支持正则表达式，例如 %s 或 %s。",
+	"Invalid port list": "端口列表无效",
+	"Unknown port choice": "未知的端口选项",
+	"Unknown log level": "未知的日志级别",
+	"Invalid device rule": "设备规则无效",
+	"Unknown action": "未知操作",
+	"Restart failed": "重启失败",
+	"Keywords cannot contain spaces": "关键字不能包含空格",
+	"Another sing-box task is still running. Wait for it to finish.": "另一个 sing-box 任务还在进行，请等它结束。"
 }

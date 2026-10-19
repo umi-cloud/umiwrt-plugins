@@ -5,7 +5,7 @@
 
 	/* 设备分区的第二张卡：给个别设备单独的走代理方式（service.js 的 DEVICE_RULES）。这些设备仍要按上面的名单使用代理才生效。
 	   devices 为页面的设备行（在线客户端与已保存的 MAC），write 为页面的保存流程。重载只更新基线，未保存的草稿保留，除非用户已确认放弃。 */
-	let { data, svc, devices = [], loading = false, locked = false, write } = $props();
+	let { data, svc, devices = [], loading = false, locked = false, saving = false, write } = $props();
 
 	let rules = $state(untrack(() => deviceRules(data.access))), baseline = $state(untrack(() => JSON.stringify(deviceRules(data.access))));
 	const dirty = $derived(JSON.stringify(rules) !== baseline);
@@ -75,7 +75,7 @@
 		{/if}
 		{#if data.mode === 'custom' && rules.some(r => r.rule === 'global')}<Feedback tone="info" message={t('Custom routing is in use, so “Everything through the proxy” has no effect.')} compact />{/if}
 		{#if data.ports === 'all' && rules.some(r => r.rule === 'gaming')}<Feedback tone="info" message={t('All ports already go through the proxy, so “All ports through the proxy” makes no difference.')} compact />{/if}
-		<FormActions busy={locked} disabled={!dirty} description={t('Changes take effect when you save. If the device becomes unreachable, they roll back automatically.')} />
+		<FormActions busy={saving} disabled={locked || !dirty} description={t('Changes take effect when you save. If the device becomes unreachable, they roll back automatically.')} />
 	</form>
 </Card>
 

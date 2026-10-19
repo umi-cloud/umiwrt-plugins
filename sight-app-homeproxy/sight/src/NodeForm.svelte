@@ -6,7 +6,7 @@
 
 	/* 节点编辑表单（放在页面的抽屉里）：常用项在前，其余进「高级」。target 为 { id, raw, subscribed }，新建时 id 与 raw 为空。
 	   onsubmit(plan) 写入并应用，成功由页面关闭抽屉；未保存的改动经 useEditor 参与离开确认。 */
-	let { target, features = {}, locked = false, onsubmit, oncancel } = $props();
+	let { target, features = {}, locked = false, saving = false, onsubmit, oncancel } = $props();
 	/* 打开抽屉时取一次初值，之后页面数据重载不影响正在编辑的表单 */
 	const form = $state(untrack(() => nodeForm(target.raw)));
 	const baseline = JSON.stringify(form);
@@ -179,7 +179,7 @@
 		</Disclosure>
 	{/if}
 
-	<FormActions busy={locked} disabled={!dirty && !!target.id} {oncancel} saveLabel={target.id ? t('Save') : t('Add node')}
+	<FormActions busy={saving} disabled={locked || (!dirty && !!target.id)} {oncancel} saveLabel={target.id ? t('Save') : t('Add node')}
 		description={t('Changes take effect when you save. If the device becomes unreachable, they roll back automatically.')} />
 </form>
 

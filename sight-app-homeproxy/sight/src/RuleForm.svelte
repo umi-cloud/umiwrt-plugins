@@ -5,7 +5,7 @@
 
 	/* 分流规则 / DNS 规则表单（放在自定义分流的抽屉里）。raw 为原有节，新建为空；dns 为 true 时编辑 DNS 规则。
 	   常用条件在前，精确域名、网络类型、反选等进「高级」；表单不管理的条件原样保留并提示。 */
-	let { dns = false, raw = null, custom, locked = false, labels, onsubmit, oncancel } = $props();
+	let { dns = false, raw = null, custom, locked = false, saving = false, labels, onsubmit, oncancel } = $props();
 	const prefix = untrack(() => dns ? 'hp-dnsrule' : 'hp-rule');
 	const initial = () => {
 		if (raw) return dns ? dnsRuleForm(raw) : ruleForm(raw);
@@ -103,7 +103,7 @@
 	</Disclosure>
 	<Checkbox bind:checked={form.enabled} disabled={locked}>{t('Turned on')}</Checkbox>
 
-	<FormActions busy={locked} disabled={!dirty && !!raw} {oncancel} saveLabel={raw ? t('Save') : t('Add rule')}
+	<FormActions busy={saving} disabled={locked || (!dirty && !!raw)} {oncancel} saveLabel={raw ? t('Save') : t('Add rule')}
 		description={t('Rules are checked from top to bottom; the first match wins.')} />
 </form>
 

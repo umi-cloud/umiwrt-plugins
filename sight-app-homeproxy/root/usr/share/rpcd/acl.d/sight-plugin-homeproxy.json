@@ -3,6 +3,9 @@
 		"description": "Sight HomeProxy page: status and diagnosis, nodes and latency, routing, domain lists, subscriptions, resources, sing-box core and logs",
 		"read": {
 			"ubus": {
+				"service": [
+					"list"
+				],
 				"sight.homeproxy": [
 					"acllist_read",
 					"client_errors",
@@ -34,6 +37,9 @@
 		},
 		"write": {
 			"ubus": {
+				"sight": [
+					"setInitAction"
+				],
 				"sight.homeproxy": [
 					"acllist_write",
 					"core_start",

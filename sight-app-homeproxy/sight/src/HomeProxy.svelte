@@ -2,7 +2,7 @@
 	import { onDestroy, tick } from 'svelte';
 	import { t, errorText, client, route, navigate, activity, useEditor, requestLeave, editing, uci, pending, saveFlow, createClients, isMac, Card, Switch, Button, Badge, StatusHero, Callout, Select, Input, Textarea, Checkbox, RadioGroup, SettingRow, DynamicList, Field, Tabs, Drawer, Dialog, FormActions, ErrorSummary, Feedback, Table, Toolbar, Disclosure } from '@sight/sdk';
 	import { createHomeProxy, MODES, SITES, RESOURCES, ACCESS, DNS_PRESETS, CHINA_DNS_PRESETS, validateSubscriptions, validateRouting, previewLinks, missingResources, DOMAIN_LISTS, parseDomains, validateDomains, LATENCY_BATCH, latencyTone, sortByLatency, localTime } from './service.js';
-	import { nodeGroups, sourceOf, failedSubscriptions, MANUAL, ORPHAN } from './subscription.js';
+	import { nodeGroups, sourceOf, failedSubscriptions, nodeInUse, MANUAL, ORPHAN } from './subscription.js';
 	import { TEMPLATES, find, DIRECT, BLOCK } from './routing.js';
 	import NodeForm from './NodeForm.svelte';
 	import SubscriptionTools from './SubscriptionTools.svelte';
@@ -177,7 +177,7 @@
 	const nodeUse = n => custom ? (data.custom.outbounds.some(o => o.enabled && (o.node === n.id || o.urltest.includes(n.id))) ? t('Used by routing') : '')
 		: n.id === data.mainNode && data.enabled ? t('Main node') : n.id === data.udpNode ? t('UDP node') : '';
 	/* 被配置引用的节点（含停用的出站、关闭代理前的主节点）不能删 */
-	const nodeBusy = n => n.id === data.mainNode || n.id === data.udpNode || data.used.includes(n.id);
+	const nodeBusy = n => nodeInUse(data, n.id);
 	/* 订阅常带来几十上百个节点：表格列出，按名称、地址或协议检索，可按来源（各订阅/手工添加）筛选；默认使用中的节点排在最前，
 	   测过延迟后可按延迟排序（测试进行中保持原顺序，避免行跳动） */
 	let nodeQuery = $state(''), nodeSource = $state('all'), nodeSort = $state('default');
@@ -559,12 +559,12 @@
 								</SettingRow>
 							</div>
 						</Disclosure>
-						<FormActions busy={locked} disabled={!routingDirty} description={t('Changes take effect when you save. If the device becomes unreachable, they roll back automatically.')} />
+						<FormActions busy={busy} disabled={locked || !routingDirty} description={t('Changes take effect when you save. If the device becomes unreachable, they roll back automatically.')} />
 					</form>
 				</Card>
 			{/if}
 			{#if custom}
-				<CustomRouting {data} {svc} {locked} {write} error={drawerError} />
+				<CustomRouting {data} {svc} {locked} saving={busy} {write} error={drawerError} />
 			{:else}
 				<div class="domains">
 					<Card title={t('Custom domains')}>
@@ -579,7 +579,7 @@
 									<DynamicList id="hp-direct-domains" bind:values={domains.direct_list} bind:draft={domainDrafts.direct_list} disabled={locked} placeholder="example.com" spellcheck="false" autocomplete="off" aria-describedby="hp-direct-domains-help" />
 								</Field>
 								{#if domainsError}<Feedback tone="error" message={domainsError} compact />{/if}
-								<FormActions busy={locked} disabled={!domainsDirty} description={data.enabled ? t('Saving reloads HomeProxy, which interrupts the proxy for a few seconds.') : t('Takes effect the next time the proxy is turned on.')} />
+								<FormActions busy={domainsBusy} disabled={locked || !domainsDirty} description={data.enabled ? t('Saving reloads HomeProxy, which interrupts the proxy for a few seconds.') : t('Takes effect the next time the proxy is turned on.')} />
 							</form>
 						{/if}
 					</Card>
@@ -637,10 +637,10 @@
 								</div>
 							</Field>
 						{/if}
-						<FormActions busy={locked} disabled={!accessDirty} description={t('Rules by IP address already in the configuration are kept unchanged.')} />
+						<FormActions busy={busy} disabled={locked || !accessDirty} description={t('Rules by IP address already in the configuration are kept unchanged.')} />
 					</form>
 				</Card>
-				<DeviceRules {data} {svc} {locked} {write} devices={deviceRows} loading={devices === null && !devicesError} />
+				<DeviceRules {data} {svc} {locked} saving={busy} {write} devices={deviceRows} loading={devices === null && !devicesError} />
 			</div>
 			{/if}
 		</div>
@@ -653,7 +653,7 @@
 						<Field id="hp-subs" label={t('Subscription addresses')} help={t('Addresses from your provider. Save, then update to fetch nodes.')} error={subsError}>
 							<DynamicList id="hp-subs" bind:values={subs} bind:draft={subsDraft} disabled={locked} placeholder="https://" aria-describedby={subsError ? 'hp-subs-help hp-subs-error' : 'hp-subs-help'} />
 						</Field>
-						<FormActions busy={locked} disabled={!subsDirty}>
+						<FormActions busy={busy} disabled={locked || !subsDirty}>
 							<Button onclick={updateSubs} disabled={locked || !data.subscriptions.length || subsDirty}>{updating ? t('Updating…') : t('Update now')}</Button>
 						</FormActions>
 					</form>
@@ -668,7 +668,7 @@
 						</SettingRow>
 					</div>
 				</Card>
-				<SubscriptionTools {data} {svc} {locked} {write} onshow={showSource} status={subStatus} />
+				<SubscriptionTools {data} {svc} {locked} saving={busy} {write} onshow={showSource} status={subStatus} />
 			</div>
 		</div>
 
@@ -683,7 +683,7 @@
 		</div>
 
 		<Drawer error={drawerError} open={!!nodeEditing} title={nodeEditing?.id ? t('Edit node %s', nodeEditing.label) : t('Add node')} onclose={closeNode}>
-			{#if nodeEditing}<NodeForm target={nodeEditing} features={data.features} {locked} onsubmit={saveNode} oncancel={closeNode} />{/if}
+			{#if nodeEditing}<NodeForm target={nodeEditing} features={data.features} {locked} saving={busy} onsubmit={saveNode} oncancel={closeNode} />{/if}
 		</Drawer>
 
 		<Drawer error={drawerError} open={!!importing} title={t('Import share links')} onclose={closeImport}>
@@ -702,7 +702,7 @@
 							{/each}
 						</ul>
 					{/if}
-					<FormActions busy={locked} disabled={!valid.length} oncancel={closeImport} saveLabel={valid.length ? t('Import %d nodes', valid.length) : t('Import')}
+					<FormActions busy={busy} disabled={locked || !valid.length} oncancel={closeImport} saveLabel={valid.length ? t('Import %d nodes', valid.length) : t('Import')}
 						description={t('Imported nodes are added when you save.')} />
 				</form>
 			{/if}

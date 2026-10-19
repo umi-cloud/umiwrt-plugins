@@ -1,18 +1,18 @@
 <script>
 	import { untrack, tick } from 'svelte';
 	import { t, useEditor, editing, Card, Table, Button, Dialog, Select, Field, DynamicList, Input, FormActions, SettingRow, Disclosure, ErrorSummary } from '@sight/sdk';
-	import { nodeGroups, planRemoveGroup, filtered, validateFilter, subscriptionInfo, FILTER_MODES, ORPHAN } from './subscription.js';
+	import { nodeGroups, planRemoveGroup, filtered, validateFilter, nodeInUse, FILTER_MODES, ORPHAN } from './subscription.js';
 
 	/* 订阅分区的两张卡：按订阅查看/删除节点（含上次更新结果）、订阅过滤设置。write 为页面的保存流程，svc 为页面的取数服务，
 	   status 为 subscription.js 的 parseStatus 结果（还没更新过为 null）。 */
-	let { data, svc, locked = false, write, onshow, status = null } = $props();
+	let { data, svc, locked = false, saving = false, write, onshow, status = null } = $props();
 
 	/* --- 按订阅归组 --- */
 	const groups = $derived(nodeGroups(data.subscriptions, data.nodes));
 	const hashes = $derived(new Set(groups.groups.map(g => g.hash)));
 	const rows = $derived([...groups.groups.map(g => ({ id: g.hash, title: g.title, url: g.url, count: g.count })),
 		...(groups.orphan ? [{ id: ORPHAN, title: t('Removed subscriptions'), url: '', count: groups.orphan }] : [])]);
-	const used = $derived(new Set([data.mainNode, data.udpNode, ...data.used]));
+	const used = $derived(new Set(data.nodes.filter(n => nodeInUse(data, n.id)).map(n => n.id)));
 	let removing = $state(null);
 	function askRemove(row) {
 		removing = { ...row, plan: planRemoveGroup(data.nodes, row.id, hashes, used) };
@@ -92,7 +92,7 @@
 			</Select>
 		</SettingRow>
 		{#if filter.mode !== 'disabled'}
-			<Field id="hp-filter-keywords" label={t('Keywords')} help={t('Regular expressions are allowed, for example 到期|剩余 or ^HK.')} error={errors.find(e => e.field === 'hp-filter-keywords')?.text || ''}>
+			<Field id="hp-filter-keywords" label={t('Keywords')} help={t('Regular expressions are allowed, for example %s or %s.', '到期|剩余', '^HK')} error={errors.find(e => e.field === 'hp-filter-keywords')?.text || ''}>
 				<DynamicList id="hp-filter-keywords" bind:values={filter.keywords} bind:draft={keywordDraft} disabled={locked} spellcheck="false" autocomplete="off" aria-describedby="hp-filter-keywords-help" />
 			</Field>
 			{#if subscribed.length}<p class="muted" data-hp-filter-preview>{t('With these settings, %d of the %d current subscription nodes would be skipped.', skipped, subscribed.length)}</p>{/if}
@@ -102,7 +102,7 @@
 				<Input id="hp-filter-ua" bind:value={filter.userAgent} disabled={locked} placeholder="Wget/1.21 (HomeProxy, like v2rayN)" spellcheck="false" autocomplete="off" aria-describedby="hp-filter-ua-help" />
 			</Field>
 		</Disclosure>
-		<FormActions busy={locked} disabled={!dirty} description={t('Takes effect at the next subscription update.')} />
+		<FormActions busy={saving} disabled={locked || !dirty} description={t('Takes effect at the next subscription update.')} />
 	</form>
 </Card>
 

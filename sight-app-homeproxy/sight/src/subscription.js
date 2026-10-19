@@ -81,6 +81,11 @@ export function nodesInUse(cfg) {
 	return used;
 }
 
+/** 纯函数：节点是否正被使用（主节点、UDP 节点、自定义分流的出站）；在用的不能删 */
+export function nodeInUse(data, id) {
+	return id === data.mainNode || id === data.udpNode || (data.used || []).includes(id);
+}
+
 /** 纯函数：删除某来源的全部节点，正在使用的保留 */
 export function planRemoveGroup(nodes, source, hashes, used) {
 	const own = nodes.filter(n => sourceOf(n, hashes) === source);

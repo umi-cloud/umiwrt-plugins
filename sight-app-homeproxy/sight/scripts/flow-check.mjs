@@ -35,8 +35,10 @@ await withAclUser(['sight-ui', 'sight-plugin-homeproxy'], async sid => {
 	check((await ubus(sid, 'uci', 'order', { config: 'homeproxy', sections: order }))?.[0] === 0, '加上本包权限组后可调整 homeproxy 段顺序（uci order）');
 });
 
+/* 结束时整份恢复：自定义分流、过滤等改动较多，逐项还原容易漏。备份在第一次改配置之前 */
+const BACKUP = '/tmp/sight-homeproxy-flow.bak';
+sh(`cp /etc/config/homeproxy ${BACKUP}`);
 /* 固定的测试前提：有一个本地节点且代理关闭 */
-const hpMode = sh('uci -q get homeproxy.config.routing_mode || echo bypass_mainland_china').trim();
 sh(`uci set homeproxy.sighttest=node; uci set homeproxy.sighttest.label='Sight test node'; uci set homeproxy.sighttest.type=socks; uci set homeproxy.sighttest.address=127.0.0.1; uci set homeproxy.sighttest.port=1080;
 	uci set homeproxy.config.main_node=nil; uci -q delete homeproxy.subscription.subscription_url; uci commit homeproxy`);
 /* 延迟接口：本机 1080 无人监听为拒绝连接；只走 UDP 的协议交给页面 ping；超过 128 个拒绝 */
@@ -50,9 +52,6 @@ section('延迟接口');
 	check(/Invalid argument/.test(sh(`ubus call sight.homeproxy node_latency '${many}' 2>&1 || true`)), '一次超过 128 个节点被拒绝');
 }
 
-/* 结束时整份恢复：自定义分流、过滤等改动较多，逐项还原容易漏 */
-const BACKUP = '/tmp/sight-homeproxy-flow.bak';
-sh(`cp /etc/config/homeproxy ${BACKUP}`);
 /* 用 HomeProxy 自己的脚本生成客户端配置并让 sing-box 检查 */
 const singboxCheck = () => { try { return sh('ucode -S /etc/homeproxy/scripts/generate_client.uc && sing-box check -c /var/run/homeproxy/sing-box-c.json && echo SIGHT_CHECK_OK 2>&1'); } catch (e) { return String(e.stdout || '') + String(e.stderr || e.message); } };
 const uget = key => sh(`uci -q get homeproxy.${key} || true`).trim();
@@ -531,9 +530,6 @@ try {
 		check(sh('uci get homeproxy.config.main_node').trim() === 'nil', '关闭代理写回 nil');
 	});
 } finally {
-	sh(`cp ${BACKUP} /etc/config/homeproxy; rm -f ${BACKUP} /www/sight-flow-sub.txt /etc/homeproxy/subscription_status.json; rm -rf /tmp/sight-homeproxy`);
-	sh(`uci set homeproxy.config.main_node=nil; uci set homeproxy.config.routing_mode=${hpMode}; uci set homeproxy.config.main_udp_node=same; uci set homeproxy.config.dns_server=8.8.8.8;
-		uci -q delete homeproxy.subscription.subscription_url; uci set homeproxy.subscription.update_via_proxy=0; uci set homeproxy.control.lan_proxy_mode=disabled; uci -q delete homeproxy.control.lan_proxy_mac_addrs;
-		for s in $(uci -X show homeproxy | grep -E "label='Sight (Tokyo|HK)'" | cut -d. -f2); do uci delete homeproxy.$s; done; uci commit homeproxy; /etc/init.d/homeproxy stop 2>/dev/null; true`);
+	sh(`cp ${BACKUP} /etc/config/homeproxy; rm -f ${BACKUP} /www/sight-flow-sub.txt /etc/homeproxy/subscription_status.json; rm -rf /tmp/sight-homeproxy; /etc/init.d/homeproxy stop 2>/dev/null; true`);
 }
 finish();

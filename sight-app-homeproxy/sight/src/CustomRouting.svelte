@@ -7,7 +7,7 @@
 
 	/* 自定义分流：默认去向与 DNS、分流规则（有序）、出站、规则集、DNS 服务器与 DNS 规则（有序）。
 	   增改在抽屉里进行；启停即时写入；排序先在列表里调好，再一次保存。write 为页面的保存流程。 */
-	let { data, svc, locked = false, write, error = '' } = $props();
+	let { data, svc, locked = false, saving = false, write, error = '' } = $props();
 	const c = $derived(data.custom);
 	const problemList = $derived(findProblems(c, data.nodes));
 
@@ -216,7 +216,7 @@
 					</Select>
 				</SettingRow>
 			</Disclosure>
-			<FormActions busy={locked} disabled={!settingsDirty} />
+			<FormActions busy={saving} disabled={locked || !settingsDirty} />
 		</form>
 	</Card>
 
@@ -286,9 +286,9 @@
 	<Drawer open={!!editingItem} title={drawerTitle} {error} onclose={close}>
 		{#if editingItem}
 			{#if editingItem.kind === 'rule' || editingItem.kind === 'dnsRule'}
-				<RuleForm dns={editingItem.kind === 'dnsRule'} raw={editingItem.raw} custom={c} {locked} {labels} onsubmit={saveItem} oncancel={close} />
+				<RuleForm dns={editingItem.kind === 'dnsRule'} raw={editingItem.raw} custom={c} {locked} {saving} {labels} onsubmit={saveItem} oncancel={close} />
 			{:else}
-				<RoutingItemForm kind={editingItem.kind} raw={editingItem.raw} custom={c} nodes={data.nodes} {locked} {labels} onsubmit={saveItem} oncancel={close} />
+				<RoutingItemForm kind={editingItem.kind} raw={editingItem.raw} custom={c} nodes={data.nodes} {locked} {saving} {labels} onsubmit={saveItem} oncancel={close} />
 			{/if}
 		{/if}
 	</Drawer>

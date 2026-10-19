@@ -7,7 +7,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=sight-app-homeproxy
-PKG_VERSION:=1.5.1
+PKG_VERSION:=1.5.2
 PKG_RELEASE:=1
 
 PKG_LICENSE:=GPL-2.0-only
@@ -21,11 +21,12 @@ define Package/sight-app-homeproxy
   SUBMENU:=Web Servers/Proxies
   TITLE:=HomeProxy (sing-box) for Sight
   PKGARCH:=all
-  # 启动项等系统接口由 sight-ui 0.4.0 起自带的 sight 对象提供
+  # 启动项接口（sight 对象）与共享模块 sight.rpc 由 sight-ui 0.5.0 起提供
   EXTRA_DEPENDS:=sight-ui (>=0.5.0)
   DEPENDS:= \
 	+sing-box \
 	+firewall4 \
+	+jsonfilter \
 	+kmod-nft-tproxy \
 	+ucode-mod-digest \
 	+rpcd +rpcd-mod-ucode \

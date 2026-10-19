@@ -4,7 +4,7 @@
 	import { outboundForm, rulesetForm, dnsForm, planOutbound, planRuleset, planDns, validateOutbound, validateRuleset, validateDns, parseDnsAddress, guessFormat, DIRECT, BUILTIN_DNS } from './routing.js';
 
 	/* 出站 / 规则集 / DNS 服务器表单（放在自定义分流的抽屉里）。kind 为 outbound | ruleset | dns，raw 为原有节，新建为空。 */
-	let { kind, raw = null, custom, nodes, locked = false, labels, onsubmit, oncancel } = $props();
+	let { kind, raw = null, custom, nodes, locked = false, saving = false, labels, onsubmit, oncancel } = $props();
 	/* 打开抽屉时取一次初值，之后页面数据重载不影响正在编辑的表单；新出站默认选还没有出站使用的节点 */
 	const id = untrack(() => raw?.['.name'] || '');
 	const form = $state(untrack(() => {
@@ -137,7 +137,7 @@
 	{/if}
 
 	<Checkbox bind:checked={form.enabled} disabled={locked}>{t('Turned on')}</Checkbox>
-	<FormActions busy={locked} disabled={!dirty && !!raw} {oncancel} saveLabel={raw ? t('Save') : t('Add')}
+	<FormActions busy={saving} disabled={locked || (!dirty && !!raw)} {oncancel} saveLabel={raw ? t('Save') : t('Add')}
 		description={t('Changes take effect when you save. If the device becomes unreachable, they roll back automatically.')} />
 </form>
 

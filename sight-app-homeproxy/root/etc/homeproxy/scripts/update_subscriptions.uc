@@ -8,7 +8,7 @@
 'use strict';
 
 import { md5 } from 'digest';
-import { open, writefile } from 'fs';
+import { open, rename, unlink, writefile } from 'fs';
 import { connect } from 'ubus';
 import { cursor } from 'uci';
 
@@ -65,13 +65,16 @@ function filter_check(name) {
 const node_cache = {},
       node_result = [];
 
-/* Sight：每次更新（含定时更新）的结果，供页面按订阅展示 */
+/* Sight：每次更新（含定时更新）的结果，供页面按订阅展示；先写临时文件再改名，页面不会读到写了一半的内容 */
+const STATUS_FILE = `${HP_DIR}/subscription_status.json`;
 const sub_status = { time: time(), result: 'ok', subscriptions: [] };
 function write_status(result, extra) {
 	sub_status.result = result;
+	sub_status.finished = time();
 	for (let k in extra)
 		sub_status[k] = extra[k];
-	writefile(`${HP_DIR}/subscription_status.json`, sprintf('%J', sub_status));
+	writefile(STATUS_FILE + '.tmp', sprintf('%J', sub_status));
+	rename(STATUS_FILE + '.tmp', STATUS_FILE);
 }
 
 const ubus = connect();
@@ -669,7 +672,10 @@ function main() {
 	write_status('ok', { added, removed });
 }
 
-if (!isEmpty(subscription_urls))
+if (isEmpty(subscription_urls))
+	/* 订阅都删掉了：旧结果不再有意义 */
+	unlink(STATUS_FILE);
+else
 	try {
 		call(main);
 	} catch(e) {

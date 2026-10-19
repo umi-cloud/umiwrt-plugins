@@ -12,12 +12,12 @@
  * IPv6（ipv6_support，缺省按关闭处理）：关闭时防火墙只接管 IPv4，代理的 DNS 只返回 IPv4 地址，直接发出的 IPv6 连接不经代理。
  */
 import { probe, readFile, isIPv4, isIPv6, isHostname, isMac, toList as list, ignoreNotFound } from '@sight/sdk/lib';
+import { parseShareLink } from './sharelink.js';
+import { FILTER_MODES, nodesInUse, nodeInUse, planFilter, validateFilter, parseStatus } from './subscription.js';
+import { shapeCustom, planSettings, planTemplate, referrers, missingDeps, find, SECTION, OFF as CUSTOM_OFF, DIRECT, BLOCK } from './routing.js';
 
 /* 启动项操作走宿主自带的 sight 对象（sight-ui ≥ 0.5.0，包依赖已约束） */
 const initAction = (client, name, action) => client.call('sight', 'setInitAction', { name, action });
-import { parseShareLink } from './sharelink.js';
-import { FILTER_MODES, nodesInUse, planFilter, validateFilter, parseStatus } from './subscription.js';
-import { shapeCustom, planSettings, planTemplate, referrers, missingDeps, find, SECTION, OFF as CUSTOM_OFF, DIRECT, BLOCK } from './routing.js';
 
 export const MODES = ['bypass_mainland_china', 'gfwlist', 'proxy_mainland_china', 'global'];
 export const LOGS = ['homeproxy', 'sing-box-c'];
@@ -74,7 +74,7 @@ export function logTime(line) {
 	return m && MONTHS.includes(m[1]) ? `${m[6]}${pad(MONTHS.indexOf(m[1]) + 1)}${pad(m[2])}${m[3]}${m[4]}${m[5]}` : '';
 }
 /** 去掉 sing-box 日志行的时间与级别前缀，只留错误内容 */
-const errorText = line => line.replace(ANSI, '').replace(/^.*?\b(?:FATAL|ERROR)\[\d+\]\s*/, '').trim();
+const fatalMessage = line => line.replace(ANSI, '').replace(/^.*?\b(?:FATAL|ERROR)\[\d+\]\s*/, '').trim();
 /**
  * 纯函数：代理开着但 sing-box 没在运行时找原因。
  * 服务日志（homeproxy.log）里最近一次启动失败（[DAEMON] Error: …，紧挨着的前几行是 generate_client.uc 或 sing-box check 的错误输出）
@@ -90,12 +90,12 @@ export function diagnose(serviceLog, fatalLines = []) {
 	if (failed > started) {
 		let i = failed;
 		while (i > 0 && !logTime(lines[i - 1])) i--;
-		const detail = lines.slice(i, failed).map(errorText).find(Boolean) || '';
+		const detail = lines.slice(i, failed).map(fatalMessage).find(Boolean) || '';
 		return { reason: /failed to generate/.test(lines[failed]) ? 'generate' : 'check', detail, log: 'homeproxy' };
 	}
 	const since = started >= 0 ? logTime(lines[started]) : '';
 	const fatal = fatalLines.filter(l => / sing-box\[\d+\]: /.test(l) && /FATAL/.test(l) && logTime(l) >= since).at(-1);
-	return fatal ? { reason: 'exited', detail: errorText(fatal), log: 'syslog' } : null;
+	return fatal ? { reason: 'exited', detail: fatalMessage(fatal), log: 'syslog' } : null;
 }
 
 /* sing-box 的编译特性与设备的内核能力（singbox_get_features）：缺少时相应的节点或功能用不了 */
@@ -290,6 +290,37 @@ export function createHomeProxy(client, uci) {
 		await uci.set('homeproxy', id, values);
 		if (remove.length) await drop('homeproxy', id, remove);
 	};
+	/** 走代理的端口与 IPv6，两种分流方式通用；自定义分流模式下单独保存 */
+	const saveTraffic = async (r) => {
+		if (!PORT_CHOICES.includes(r.ports)) throw new Error('Unknown port choice');
+		if (r.ports === 'custom' && !isPortList(r.portsCustom)) throw new Error('Invalid port list');
+		const { values, remove } = planPorts(r.ports, r.portsCustom);
+		if (typeof r.ipv6 === 'boolean') values.ipv6_support = r.ipv6 ? '1' : '0';
+		if (Object.keys(values).length) await uci.set('homeproxy', 'config', values);
+		if (remove.length) await drop('homeproxy', 'config', remove);
+	};
+	/** 预设分流模式下的模式、UDP、DNS，连同端口与 IPv6 */
+	const saveRouting = async (r) => {
+		const values = { main_udp_node: r.udpNode, dns_server: r.dnsServer.trim() };
+		if (MODES.includes(r.mode)) values.routing_mode = r.mode;
+		if (r.mode === 'bypass_mainland_china') values.china_dns_server = r.chinaDnsServer.trim();
+		await uci.set('homeproxy', 'config', values);
+		if (r.ports) await saveTraffic(r);
+	};
+	/** 代理开关（自定义模式）：关闭时把默认出站存到 sight_last_outbound，打开时恢复 */
+	const setCustomPower = async (on, custom) => {
+		if (on) {
+			const first = custom.outbounds.find(o => o.enabled)?.id;
+			const ok = id => id === DIRECT || id === BLOCK || !!find(custom, 'outbound', id)?.enabled;
+			await setNamed('routing', { default_outbound: [custom.lastOutbound, first].find(id => id && ok(id)) || DIRECT });
+		} else await setNamed('routing', { default_outbound: CUSTOM_OFF, sight_last_outbound: custom.defaultOutbound });
+	};
+	/** @returns {Promise<string | null>} null = 日志文件不存在（服务未运行过） */
+	const log = async (name) => {
+		if (!LOGS.includes(name)) throw new Error('Unknown log');
+		const f = await readFile(client, `/var/run/homeproxy/${name}.log`);
+		return f.state === 'ok' ? f.data : null;
+	};
 	return {
 		/** @returns {Promise<null | ReturnType<typeof shape> & { version: string, features: object }>} null = 未安装 */
 		async load() {
@@ -304,23 +335,8 @@ export function createHomeProxy(client, uci) {
 			if (!MODES.includes(mode)) throw new Error('Unknown routing mode');
 			await uci.set('homeproxy', 'config', { routing_mode: mode });
 		},
-		/** 自定义模式不在此页面管理，这里只写 UDP 与 DNS */
-		async saveRouting(r) {
-			const values = { main_udp_node: r.udpNode, dns_server: r.dnsServer.trim() };
-			if (MODES.includes(r.mode)) values.routing_mode = r.mode;
-			if (r.mode === 'bypass_mainland_china') values.china_dns_server = r.chinaDnsServer.trim();
-			await uci.set('homeproxy', 'config', values);
-			if (r.ports) await this.saveTraffic(r);
-		},
-		/** 走代理的端口与 IPv6，两种分流方式通用；自定义分流模式下单独保存 */
-		async saveTraffic(r) {
-			if (!PORT_CHOICES.includes(r.ports)) throw new Error('Unknown port choice');
-			if (r.ports === 'custom' && !isPortList(r.portsCustom)) throw new Error('Invalid port list');
-			const { values, remove } = planPorts(r.ports, r.portsCustom);
-			if (typeof r.ipv6 === 'boolean') values.ipv6_support = r.ipv6 ? '1' : '0';
-			if (Object.keys(values).length) await uci.set('homeproxy', 'config', values);
-			if (remove.length) await drop('homeproxy', 'config', remove);
-		},
+		saveRouting,
+		saveTraffic,
 		async setLogLevel(level) {
 			if (!LOG_LEVELS.includes(level)) throw new Error('Unknown log level');
 			await uci.set('homeproxy', 'config', { log_level: level });
@@ -350,14 +366,14 @@ export function createHomeProxy(client, uci) {
 		},
 		/** 正在使用的节点（主节点、UDP 节点、自定义分流的出站）不删，避免服务引用不存在的节点 */
 		async removeNode(id, data) {
-			if (id === data.mainNode || id === data.udpNode || data.used?.includes(id)) throw new Error('This node is in use');
+			if (nodeInUse(data, id)) throw new Error('This node is in use');
 			await uci.remove('homeproxy', id);
 		},
 		/** 新建（id 为空）或按计划改写节点；计划来自 node.js 的 planNode */
 		async saveNode(id, plan, data) { await writeSection('node', id, plan, id ? null : sectionName(PREFIX.node, data.custom.order)); },
 		/** 批量删除（按订阅删除节点）；调用方已排除使用中的节点 */
 		async removeNodes(ids, data) {
-			if (ids.some(id => id === data.mainNode || id === data.udpNode || data.used.includes(id))) throw new Error('This node is in use');
+			if (ids.some(id => nodeInUse(data, id))) throw new Error('This node is in use');
 			for (const id of ids) await uci.remove('homeproxy', id);
 		},
 		async saveFilter(f) {
@@ -389,14 +405,7 @@ export function createHomeProxy(client, uci) {
 			await setNamed('dns', dns.values);
 			if (dns.remove.length) await drop('homeproxy', 'dns', dns.remove);
 		},
-		/** 代理开关（自定义模式）：关闭时把默认出站存到 sight_last_outbound，打开时恢复 */
-		async setCustomPower(on, custom) {
-			if (on) {
-				const first = custom.outbounds.find(o => o.enabled)?.id;
-				const ok = id => id === DIRECT || id === BLOCK || !!find(custom, 'outbound', id)?.enabled;
-				await setNamed('routing', { default_outbound: [custom.lastOutbound, first].find(id => id && ok(id)) || DIRECT });
-			} else await setNamed('routing', { default_outbound: CUSTOM_OFF, sight_last_outbound: custom.defaultOutbound });
-		},
+		setCustomPower,
 		/**
 		 * 切换到自定义模式。还没有任何出站时按模板建立初始配置（routing.js 的 planTemplate），
 		 * 已有自定义配置则原样沿用，只让代理开关状态与切换前一致。
@@ -411,16 +420,16 @@ export function createHomeProxy(client, uci) {
 				await setNamed('routing', plan.routing);
 				await setNamed('dns', plan.dns);
 			} else if (data.enabled && c.defaultOutbound === CUSTOM_OFF) {
-				await this.setCustomPower(true, c);
+				await setCustomPower(true, c);
 			} else if (!data.enabled && c.defaultOutbound !== CUSTOM_OFF) {
-				await this.setCustomPower(false, c);
+				await setCustomPower(false, c);
 			}
 			await uci.set('homeproxy', 'config', { routing_mode: 'custom' });
 		},
 		/** 从自定义切回预设模式：主节点按 leaveCustomNode 定，再写模式、UDP 与 DNS */
 		async leaveCustom(data, r) {
 			await uci.set('homeproxy', 'config', { main_node: leaveCustomNode(data) });
-			await this.saveRouting(r);
+			await saveRouting(r);
 		},
 		async saveSubscriptions(urls) {
 			if (urls.length) await uci.set('homeproxy', 'subscription', { subscription_url: urls });
@@ -439,10 +448,8 @@ export function createHomeProxy(client, uci) {
 			const f = await readFile(client, '/etc/homeproxy/subscription_status.json');
 			return f.state === 'ok' ? parseStatus(f.data) : null;
 		},
-		/** @returns {Promise<Record<string, string | null>>} 规则库版本；文件不存在为 null */
+		/** @returns {Promise<Record<string, string | null>>} 规则库版本；文件不存在为 null。读取失败向上抛，不当作未下载 */
 		async resourceVersions() {
-			/* 插件在返回版本号的同时可能带着残留的 error 字段（上一次系统调用的 errno）：有版本号即以版本号为准。
-			   读取失败向上抛，不当作未下载 */
 			const r = await Promise.all(RESOURCES.map(type => client.call('sight.homeproxy', 'resources_get_version', { type })));
 			return Object.fromEntries(RESOURCES.map((type, i) => [type, r[i]?.version || null]));
 		},
@@ -458,12 +465,7 @@ export function createHomeProxy(client, uci) {
 			const r = await client.call('sight.homeproxy', 'connection_check', { site });
 			return !!r?.result;
 		},
-		/** @returns {Promise<string | null>} null = 日志文件不存在（服务未运行过） */
-		async log(name) {
-			if (!LOGS.includes(name)) throw new Error('Unknown log');
-			const f = await readFile(client, `/var/run/homeproxy/${name}.log`);
-			return f.state === 'ok' ? f.data : null;
-		},
+		log,
 		/** @returns {Promise<{ proxy_list: string[], direct_list: string[] }>} */
 		async domainLists() {
 			const r = await Promise.all(DOMAIN_LISTS.map(type => client.call('sight.homeproxy', 'acllist_read', { type })));
@@ -498,19 +500,20 @@ export function createHomeProxy(client, uci) {
 			const r = await client.call('file', 'exec', { command: '/bin/ping', params: ['-4', '-c', '3', '-W', '1', node.address] });
 			return parsePing(r.stdout) ?? 'timeout';
 		},
-		/** 代理开着但 sing-box 没运行时的原因（diagnose）；读不到日志时返回 null，不影响页面 */
+		/** 代理开着但 sing-box 没运行时的原因（diagnose）；找不到原因时为 null */
 		async diagnosis() {
-			const [service, errors] = await Promise.all([this.log('homeproxy'), client.call('sight.homeproxy', 'client_errors')]);
+			const [service, errors] = await Promise.all([log('homeproxy'), client.call('sight.homeproxy', 'client_errors')]);
 			return diagnose(service, errors?.lines || []);
 		},
 		/** @returns {Promise<{ running: boolean, uptime?: number | null, memory?: number | null }>} sing-box 客户端的运行时长（秒）与内存（字节） */
 		async clientStatus() { return await client.call('sight.homeproxy', 'client_status') || { running: false }; },
 		/** @returns {Promise<ReturnType<typeof coreUpdateState>>} */
 		async coreUpdate() { return coreUpdateState(await client.call('sight.homeproxy', 'core_task')); },
-		/** 开始检查（check）或更新（upgrade）；后台进行，之后用 coreUpdate 轮询 */
+		/** 开始检查（check）或更新（upgrade）；后台进行，之后用 coreUpdate 轮询。@returns {Promise<boolean>} 已有任务进行中时为 false */
 		async coreStart(action) {
 			if (!['check', 'upgrade'].includes(action)) throw new Error('Unknown action');
-			await client.call('sight.homeproxy', 'core_start', { action });
+			const r = await client.call('sight.homeproxy', 'core_start', { action });
+			return r?.started !== false;
 		},
 		/** 重启 HomeProxy（即时操作，代理中断几秒） */
 		async restart() {

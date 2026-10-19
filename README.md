@@ -20,6 +20,8 @@ echo "src-git umiwrt_plugins https://github.com/umi-cloud/umiwrt-plugins.git" >>
 
 `sight-app-homeproxy` 声明了 `PROVIDES`/`CONFLICTS luci-app-homeproxy`，与 luci feed 里的原包二选一。
 
+`sight-app-homeproxy` 与它依赖的 `sing-box` 不进固件，由应用市场安装：`sing-box` 来自设备自带的 OpenWrt/ImmortalWrt 软件源（国内镜像），本仓库不编译也不分发它。它依赖的内核模块（`kmod-nft-tproxy`、`kmod-tun`）必须与内核一致，由固件配置显式选入（见 UmiWrt 的 `bpi-r4*.config`）。
+
 ## 应用源
 
 Sight 的应用市场从这里安装插件。推送到 `master` 后 CI（`.github/workflows/publish.yml`）在 ImmortalWrt SDK 镜像里编出全部 `sight-app-*`，生成签名索引与 `catalog.json`，发布到 gh-pages：

@@ -32,7 +32,8 @@
 		confirmUpgrade = false;
 		if (locked) return;
 		onnotice?.(null);
-		try { await svc.coreStart(action); } catch (e) { if (alive) onnotice?.({ tone: 'error', text: errorText(e) }); }
+		try { if (!await svc.coreStart(action) && alive) onnotice?.({ tone: 'info', text: t('Another sing-box task is still running. Wait for it to finish.') }); }
+		catch (e) { if (alive) onnotice?.({ tone: 'error', text: errorText(e) }); }
 		if (alive) await loadCore();
 	}
 	async function restart() {
