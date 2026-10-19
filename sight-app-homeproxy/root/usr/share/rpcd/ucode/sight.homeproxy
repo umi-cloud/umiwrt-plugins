@@ -281,7 +281,9 @@ const methods = {
 
 	/*
 	 * 路由器到各节点服务器端口的 TCP 握手耗时（不经代理）：先逐个解析地址，再一起非阻塞 connect，
-	 * 最多等 LATENCY_TIMEOUT。结果为毫秒，或 'timeout' / 'refused' / 'unresolved' / 'udp' / 'error'
+	 * 最多等 LATENCY_TIMEOUT。结果为毫秒，或 'timeout' / 'refused' / 'unresolved' / 'udp' / 'error'。
+	 * 连接打上 infra.self_mark，与 sing-box 自己的连接一样绕过本机防火墙：否则代理开着时，发往常用端口的
+	 * 连接会被 output 链转进本机 sing-box，测到的是本机端口
 	 */
 	node_latency: {
 		args: { nodes: [] },
@@ -292,6 +294,8 @@ const methods = {
 
 			const uci = cursor();
 			const results = {}, targets = [];
+			const self_mark = uci.get('homeproxy', 'infra', 'self_mark') || '100';
+			const mark = match(self_mark, /^0x/i) ? int(substr(self_mark, 2), 16) : int(self_mark);
 			for (let id in ids) {
 				if (type(id) !== 'string' || id in results)
 					continue;
@@ -317,6 +321,8 @@ const methods = {
 			const pending = [];
 			for (let t in targets) {
 				const sock = socket.create(t.ai.family, socket.SOCK_STREAM | socket.SOCK_NONBLOCK);
+				if (sock && mark)
+					sock.setopt(socket.SOL_SOCKET, socket.SO_MARK, mark);
 				const start = monotonicMs();
 				if (!sock)
 					results[t.id] = 'error';

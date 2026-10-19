@@ -1,23 +1,26 @@
 <script>
 	import { onDestroy, tick } from 'svelte';
-	import { t, errorText, client, createPoller, route, navigate, activity, useEditor, requestLeave, editing, uci, pending, saveFlow, createClients, isMac, Card, Switch, Button, Badge, StatusHero, Callout, LogView, Select, Input, Textarea, Checkbox, RadioGroup, SettingRow, DynamicList, Field, Tabs, Drawer, Dialog, FormActions, ErrorSummary, Feedback, Table, Toolbar, DescriptionList, fmtBytes } from '@sight/sdk';
-	import { createHomeProxy, MODES, LOGS, SITES, RESOURCES, ACCESS, DNS_PRESETS, CHINA_DNS_PRESETS, validateSubscriptions, validateRouting, previewLinks, missingResources, DOMAIN_LISTS, parseDomains, validateDomains, LATENCY_BATCH, latencyTone, sortByLatency, CORE_FEATURES } from './service.js';
+	import { t, errorText, client, createPoller, route, navigate, activity, useEditor, requestLeave, editing, uci, pending, saveFlow, createClients, isMac, Card, Switch, Button, Badge, StatusHero, Callout, LogView, Select, Input, Textarea, Checkbox, RadioGroup, SettingRow, DynamicList, Field, Tabs, Drawer, Dialog, FormActions, ErrorSummary, Feedback, Table, Toolbar, DescriptionList, Disclosure, fmtBytes } from '@sight/sdk';
+	import { createHomeProxy, MODES, LOGS, SITES, RESOURCES, ACCESS, DNS_PRESETS, CHINA_DNS_PRESETS, validateSubscriptions, validateRouting, previewLinks, missingResources, DOMAIN_LISTS, parseDomains, validateDomains, LATENCY_BATCH, latencyTone, sortByLatency, CORE_FEATURES, LOG_LEVELS } from './service.js';
 	import { nodeGroups, sourceOf, failedSubscriptions, MANUAL, ORPHAN } from './subscription.js';
 	import { TEMPLATES, find, DIRECT, BLOCK } from './routing.js';
 	import NodeForm from './NodeForm.svelte';
 	import SubscriptionTools from './SubscriptionTools.svelte';
+	import DeviceRules from './DeviceRules.svelte';
 	import CustomRouting from './CustomRouting.svelte';
 
-	/* 顶部状态卡（开关、当前节点、连通性，没在运行时附上原因）常驻；其余按任务分区：节点、分流与 DNS、设备、订阅与规则库、sing-box 核心、日志。
+	/* 顶部状态卡（开关、当前节点、连通性，没在运行时附上原因）常驻；其余按任务分区：节点、分流与 DNS（含规则库）、设备、订阅、sing-box（核心状态、日志、更新）。
 	   节点编辑（NodeForm）、订阅归组与过滤（SubscriptionTools）、自定义分流（CustomRouting）各自成组件，这里只做接入。
 	   配置保存即生效（带失联回滚）；订阅/规则库更新、连通性检查、清空日志为即时操作。 */
 	const svc = createHomeProxy(client, uci);
 	const clientsSvc = createClients(client, uci);
-	const SECTIONS = ['nodes', 'routing', 'devices', 'subscriptions', 'core', 'logs'];
+	const SECTIONS = ['nodes', 'routing', 'devices', 'subscriptions', 'core'];
+	/* 旧地址：日志并入 sing-box 分区 */
+	const sectionOf = tab => tab === 'logs' ? 'core' : SECTIONS.includes(tab) ? tab : 'nodes';
 	const tabsId = $props.id();
-	let section = $state(SECTIONS.includes(route.params.tab) ? route.params.tab : 'nodes');
+	let section = $state(sectionOf(route.params.tab));
 	/* 不带 tab 的地址（如从侧栏进入）回到节点分区 */
-	$effect(() => { section = SECTIONS.includes(route.params.tab) ? route.params.tab : 'nodes'; });
+	$effect(() => { section = sectionOf(route.params.tab); });
 
 	let data = $state(undefined);   // undefined 加载中；null 未安装
 	let error = $state('');
@@ -49,12 +52,12 @@
 		const nextSubs = [...r.subscriptions];
 		if (!subsDirty || discarded) { subs = [...nextSubs]; subsDraft = ''; subsError = ''; }
 		subsBaseline = JSON.stringify(nextSubs);
-		const nextRouting = { mode: r.mode, udpNode: r.udpNode, dns: dnsChoice(r.dnsServer), dnsCustom: dnsChoice(r.dnsServer) === 'custom' ? r.dnsServer : '',
+		const nextRouting = { mode: r.mode, udpNode: r.udpNode, ports: r.ports, portsCustom: r.portsCustom, ipv6: r.ipv6, dns: dnsChoice(r.dnsServer), dnsCustom: dnsChoice(r.dnsServer) === 'custom' ? r.dnsServer : '',
 			china: chinaChoice(r.chinaDnsServer), chinaCustom: chinaChoice(r.chinaDnsServer) === 'custom' ? r.chinaDnsServer : '' };
 		/* 切到自定义时的初始配置，按当前模式给出最接近的一种；只在选了自定义时有意义，不计入草稿 */
 		template = { bypass_mainland_china: 'bypass_china', gfwlist: 'bypass_china', global: 'global' }[r.mode] || 'blank';
 		if (!routingDirty || discarded) { routing = nextRouting; routingErrors = []; }
-		routingBaseline = JSON.stringify(nextRouting);
+		routingBaseline = routingKey(nextRouting);
 		const nextAccess = { mode: r.access.mode, macs: r.access.mode === 'except_listed' ? [...r.access.directMacs] : [...r.access.proxyMacs] };
 		if (!accessDirty || discarded) access = nextAccess;
 		accessBaseline = JSON.stringify(nextAccess);
@@ -72,7 +75,15 @@
 	$effect(() => { pending.version; load(); });
 
 	const subsDirty = $derived(JSON.stringify(subs) !== subsBaseline || !!subsDraft.trim());
-	const routingDirty = $derived(!!routing && JSON.stringify(routing) !== routingBaseline);
+	/* 比较草稿时忽略没选用的自定义输入：切回预设项后，输入框里留下的内容不算改动 */
+	function routingKey(r) {
+		return JSON.stringify({ ...r, dnsCustom: r.dns === 'custom' ? r.dnsCustom : '', chinaCustom: r.china === 'custom' ? r.chinaCustom : '', portsCustom: r.ports === 'custom' ? r.portsCustom : '' });
+	}
+	const routingDirty = $derived(!!routing && routingKey(routing) !== routingBaseline);
+	/* 「高级」默认收起；用着非默认值或其中有校验错误时展开，不让生效中的设置藏起来 */
+	let advancedOpen = $state(false);
+	$effect(() => { if (data && (data.udpNode !== 'same' || data.ports !== 'common' || !data.ipv6)) advancedOpen = true; });
+	$effect(() => { if (routingErrors.some(e => ['hp-udp', 'hp-ports-custom'].includes(e.field))) advancedOpen = true; });
 	const accessDirty = $derived(!!access && JSON.stringify(access) !== accessBaseline);
 	const importDirty = $derived(!!importing?.text.trim());
 	/* 订阅更新、规则库更新、清空日志都是即时操作：进行中阻止切页 */
@@ -95,9 +106,8 @@
 		{ value: 'nodes', label: t('Nodes'), count: data?.nodes.length ?? 0 },
 		{ value: 'routing', label: t('Routing & DNS') },
 		{ value: 'devices', label: t('Devices') },
-		{ value: 'subscriptions', label: t('Subscriptions & rules') },
+		{ value: 'subscriptions', label: t('Subscriptions') },
 		{ value: 'core', label: 'sing-box' },
-		{ value: 'logs', label: t('Logs') },
 	]);
 	/* 抽屉为模态，页面顶部的错误被遮挡：抽屉里的写入失败经它说明 */
 	const drawerError = $derived(error || (notice?.tone === 'error' ? notice.text : ''));
@@ -138,8 +148,10 @@
 	async function showDiagnosisLog() {
 		if (diagnosis.log === 'syslog') { await navigate('/logs'); return; }
 		logName = diagnosis.log;
-		section = 'logs';
-		await changeSection('logs');
+		section = 'core';
+		await changeSection('core');
+		await tick();
+		document.querySelector('[data-hp-logs]')?.scrollIntoView({ block: 'start', behavior: 'smooth' });
 	}
 
 	/* --- 节点：导入与删除 --- */
@@ -249,20 +261,24 @@
 	}
 
 	/* --- 分流与 DNS --- */
-	const routingFields = { 'Choose a UDP node': 'hp-udp', 'Invalid DNS server': 'hp-dns-custom', 'Invalid China DNS server': 'hp-china-custom' };
+	const routingFields = { 'Choose a UDP node': 'hp-udp', 'Invalid DNS server': 'hp-dns-custom', 'Invalid China DNS server': 'hp-china-custom', 'Enter ports such as 443 or 8000-9000, separated by commas': 'hp-ports-custom' };
 	const routingError = id => routingErrors.find(e => e.field === id)?.text || '';
 	async function saveRouting(event) {
 		event.preventDefault();
-		const r = { mode: routing.mode, udpNode: routing.udpNode, dnsServer: routing.dns === 'custom' ? routing.dnsCustom : routing.dns, chinaDnsServer: routing.china === 'custom' ? routing.chinaCustom : routing.china };
+		const r = { mode: routing.mode, udpNode: routing.udpNode, ports: routing.ports, portsCustom: routing.portsCustom, ipv6: routing.ipv6, dnsServer: routing.dns === 'custom' ? routing.dnsCustom : routing.dns, chinaDnsServer: routing.china === 'custom' ? routing.chinaCustom : routing.china };
 		routingErrors = validateRouting(r, data.nodes).map(m => ({ text: t(m), field: routingFields[m] }));
 		if (routingErrors.length) { await tick(); routingSummary?.focus(); return; }
 		/* 切到自定义：没有自定义配置时按所选模板建立；切回预设模式：主节点按代理开关状态确定 */
-		if (r.mode === 'custom' && !custom) { const tpl = template; await write(() => svc.enterCustom(data, tpl, t), t('Switched to custom routing.')); }
+		if (r.mode === 'custom' && !custom) { const tpl = template; await write(async () => { await svc.enterCustom(data, tpl, t); await svc.saveTraffic(r); }, t('Switched to custom routing.')); }
 		else if (r.mode !== 'custom' && custom) await write(() => svc.leaveCustom(data, r));
 		else if (r.mode !== 'custom') await write(() => svc.saveRouting(r));
+		/* 自定义分流的出站与规则在下方管理，这里只剩走代理的端口与 IPv6 */
+		else await write(() => svc.saveTraffic(r));
 	}
 	const templateLabel = v => ({ bypass_china: t('Bypass mainland China'), global: t('Proxy everything'), blank: t('Start empty') }[v]);
 	const templateHint = v => ({ bypass_china: t('Mainland China sites and addresses go direct, everything else through the proxy.'), global: t('Everything goes through the proxy except local network addresses.'), blank: t('Everything goes direct until you add rules.') }[v]);
+	const portsHint = p => p === 'common' ? t('Only traffic to common ports (%s) goes through the proxy; other ports go out directly. If games or apps on other ports are not proxied, choose all ports.', data.commonPorts.split(',').join(', '))
+		: p === 'all' ? t('Traffic to any port can go through the proxy.') : t('Only traffic to these ports goes through the proxy; other ports go out directly. Separate ports with commas; ranges such as 8000-9000 are allowed.');
 	const dnsLabel = v => v === 'wan' ? t('Uplink DNS (from WAN)') : { '1.1.1.1': 'Cloudflare (1.1.1.1)', '8.8.8.8': 'Google (8.8.8.8)', '208.67.222.222': 'Cisco OpenDNS (208.67.222.222)', '223.5.5.5': t('Aliyun (223.5.5.5)'), '119.29.29.29': t('Tencent (119.29.29.29)'), '210.2.4.8': 'CNNIC (210.2.4.8)' }[v] || v;
 
 	/* --- 设备 --- */
@@ -278,7 +294,7 @@
 		if (!access) return [];
 		const online = (devices || []).filter(c => c.mac).map(c => ({ mac: c.mac.toUpperCase(), name: c.name, ip: c.ip, online: c.online }));
 		const known = new Set(online.map(d => d.mac));
-		const saved = [...(data?.access.proxyMacs || []), ...(data?.access.directMacs || []), ...access.macs].filter(m => !known.has(m));
+		const saved = [...(data?.access.proxyMacs || []), ...(data?.access.directMacs || []), ...(data?.access.gamingMacs || []), ...(data?.access.globalMacs || []), ...access.macs].filter(m => !known.has(m));
 		return [...online, ...[...new Set(saved)].map(mac => ({ mac, name: '', ip: '', online: false }))];
 	});
 	let macDraft = $state(''), macError = $state('');
@@ -345,7 +361,7 @@
 		: s.result === 'no_nodes' ? t('Last update (%s) fetched no usable nodes; existing nodes were kept.', timeText(s.time))
 		: t('Last updated %s: %d nodes added, %d removed.', timeText(s.time), s.added, s.removed);
 	/* 代理开着时进页面就读版本：当前模式依赖的规则库缺失要在顶部提醒 */
-	$effect(() => { if (data && (data.enabled || section === 'subscriptions') && !resources && !resourcesError) loadResources(); });
+	$effect(() => { if (data && (data.enabled || section === 'routing') && !resources && !resourcesError) loadResources(); });
 	const missing = $derived(data?.enabled ? missingResources(data.mode, resources) : []);
 	async function downloadMissing() { for (const r of missing) await updateResource(r); }
 	/* 版本读取失败不显示成「未下载」 */
@@ -423,6 +439,15 @@
 
 	/* --- 日志 --- */
 	let logRequest = 0;
+	/* sing-box 日志级别：改动随配置应用重载 HomeProxy；应用失败或被放弃时选择框回到已保存的值 */
+	const logLevelLabel = l => ({ error: t('Errors only'), warn: t('Warnings (default)'), info: t('Info'), debug: t('Debug') }[l]);
+	let logLevel = $state('warn');
+	$effect(() => { if (data) logLevel = data.logLevel; });
+	async function setLogLevel(level) {
+		if (level === data.logLevel) return;
+		const ok = await write(() => svc.setLogLevel(level), t('Log level set to %s.', logLevelLabel(level)));
+		if (!ok && alive) logLevel = data.logLevel;
+	}
 	/* quiet：跟随时的定时刷新，不先清空成加载中 */
 	async function loadLog(quiet = false) {
 		const request = ++logRequest, name = logName;
@@ -430,11 +455,11 @@
 		try { const text = await svc.log(name); if (alive && request === logRequest) { logText = text; logError = ''; } }
 		catch (e) { if (alive && request === logRequest) { logText = null; logError = errorText(e); } }
 	}
-	$effect(() => { if (section === 'logs') { logName; loadLog(); } });
+	$effect(() => { if (section === 'core') { logName; loadLog(); } });
 	/* 跟随：停留在日志分区时每 5 秒刷新当前日志 */
 	let follow = $state(false);
 	const logPoller = createPoller(() => loadLog(true), 5000);
-	$effect(() => { if (follow && section === 'logs') logPoller.start(); else logPoller.stop(); });
+	$effect(() => { if (follow && section === 'core') logPoller.start(); else logPoller.stop(); });
 	/* 清空日志不可撤销：确认后执行，期间锁定其它操作 */
 	async function cleanLog() {
 		if (locked) return;
@@ -557,7 +582,7 @@
 		<!-- 分流与 DNS -->
 		<div id={`${tabsId}-panel-1`} role="tabpanel" aria-labelledby={`${tabsId}-tab-1`} hidden={section !== 'routing'} tabindex="0">
 			{#if routing}
-				<Card>
+				<Card title={t('Routing')}>
 					<form class="form" onsubmit={saveRouting} aria-label={t('Routing & DNS')}>
 						<ErrorSummary errors={routingErrors} bind:this={routingSummary} />
 						<SettingRow id="hp-mode" label={t('What goes through the proxy')} description={routing.mode === 'custom' ? t('Your own rules decide where each kind of traffic goes. Set them up below.') : t('Traffic not covered goes out directly.')}>
@@ -578,14 +603,7 @@
 							{/if}
 						{/if}
 						{#if routing.mode !== 'custom'}
-							<SettingRow id="hp-udp" label={t('UDP traffic')} description={t('Games and voice calls use UDP. Send it through the main node, a different node, or directly.')}>
-								<Select id="hp-udp" aria-describedby="hp-udp-description" bind:value={routing.udpNode} disabled={locked} aria-label={t('UDP traffic')} aria-invalid={!!routingError('hp-udp')}>
-									<option value="same">{t('Same as main node')}</option>
-									<option value="nil">{t('Go out directly')}</option>
-									{#each data.nodes as n (n.id)}<option value={n.id}>{n.label}</option>{/each}
-									{#if !['same', 'nil'].includes(routing.udpNode) && !data.nodes.some(n => n.id === routing.udpNode)}<option value={routing.udpNode}>{routing.udpNode}</option>{/if}
-								</Select>
-							</SettingRow>
+							<h3 class="group">{t('DNS')}</h3>
 							<SettingRow id="hp-dns" label={t('DNS server')} description={t('Resolves names for proxied traffic. Plain addresses use UDP; tcp://, tls:// and https:// addresses are also accepted.')}>
 								<div class="dns">
 									<Select id="hp-dns" aria-describedby="hp-dns-description" bind:value={routing.dns} disabled={locked} aria-label={t('DNS server')}>
@@ -611,10 +629,56 @@
 								</SettingRow>
 							{/if}
 						{/if}
+						<Disclosure title={t('Advanced')} description={t('UDP traffic, ports and IPv6')} bind:open={advancedOpen}>
+							<div class="advanced" data-hp-advanced>
+								{#if routing.mode !== 'custom'}
+									<SettingRow id="hp-udp" label={t('UDP traffic')} description={t('Games and voice calls use UDP. Send it through the main node, a different node, or directly.')}>
+										<Select id="hp-udp" aria-describedby="hp-udp-description" bind:value={routing.udpNode} disabled={locked} aria-label={t('UDP traffic')} aria-invalid={!!routingError('hp-udp')}>
+											<option value="same">{t('Same as main node')}</option>
+											<option value="nil">{t('Go out directly')}</option>
+											{#each data.nodes as n (n.id)}<option value={n.id}>{n.label}</option>{/each}
+											{#if !['same', 'nil'].includes(routing.udpNode) && !data.nodes.some(n => n.id === routing.udpNode)}<option value={routing.udpNode}>{routing.udpNode}</option>{/if}
+										</Select>
+									</SettingRow>
+								{/if}
+								<SettingRow id="hp-ports" label={t('Ports that use the proxy')} description={portsHint(routing.ports)}>
+									<div class="dns">
+										<Select id="hp-ports" aria-describedby="hp-ports-description" bind:value={routing.ports} disabled={locked} aria-label={t('Ports that use the proxy')}>
+											<option value="common">{t('Common ports')}</option>
+											<option value="all">{t('All ports')}</option>
+											<option value="custom">{t('Custom…')}</option>
+										</Select>
+										{#if routing.ports === 'custom'}
+											<Input id="hp-ports-custom" bind:value={routing.portsCustom} disabled={locked} placeholder="80,443,8000-9000" spellcheck="false" autocomplete="off" aria-label={t('Custom ports')} aria-invalid={!!routingError('hp-ports-custom')} />
+										{/if}
+									</div>
+								</SettingRow>
+								<SettingRow id="hp-ipv6" label={t('Proxy IPv6 traffic')} description={routing.ipv6 ? t('IPv6 traffic follows the same routing rules as IPv4.') : t('Only IPv4 traffic is proxied, and DNS answers for proxied lookups contain only IPv4 addresses. Turn this off if your uplink has no IPv6 or IPv6 connections fail.')}>
+									<Switch id="hp-ipv6" aria-describedby="hp-ipv6-description" checked={routing.ipv6} disabled={locked} aria-label={t('Proxy IPv6 traffic')} onchange={on => routing.ipv6 = on} />
+								</SettingRow>
+							</div>
+						</Disclosure>
 						<FormActions busy={locked} disabled={!routingDirty} description={t('Changes take effect when you save. If the device becomes unreachable, they roll back automatically.')} />
 					</form>
 				</Card>
 			{/if}
+			<div class="domains">
+				<Card title={t('Routing rule data')}>
+					<p class="muted lead">{t('Address and domain lists that decide what goes direct. Updating downloads the latest lists.')}</p>
+					{#if resourcesError}<Feedback tone="error" message={t('Rule data versions could not be read: %s', resourcesError)} onretry={loadResources} compact />{/if}
+					<ul class="resources">
+						{#each RESOURCES as r}
+							<li data-resource={r}>
+								<div class="resource-copy">
+									<strong>{resourceLabel(r)}</strong>
+									<span class="muted">{[resourcesError ? t('Unknown') : resources === null ? t('Loading…') : resources[r] ? t('Version %s', versionText(resources[r])) : t('Not downloaded'), resourceResult[r] ? resultText(resourceResult[r]) : ''].filter(Boolean).join(' · ')}</span>
+								</div>
+								<Button size="compact" disabled={locked} onclick={() => updateResource(r)}>{resourceBusy === r ? t('Updating…') : t('Update')}</Button>
+							</li>
+						{/each}
+					</ul>
+				</Card>
+			</div>
 			{#if custom}
 				<CustomRouting {data} {svc} {locked} {write} error={drawerError} />
 			{:else}
@@ -642,6 +706,7 @@
 		<!-- 设备 -->
 		<div id={`${tabsId}-panel-2`} role="tabpanel" aria-labelledby={`${tabsId}-tab-2`} hidden={section !== 'devices'} tabindex="0">
 			{#if access}
+			<div class="stack">
 				<Card>
 					<form class="form" onsubmit={saveAccess} aria-label={t('Devices using the proxy')}>
 						<RadioGroup name="hp-access" label={t('Which devices use the proxy')} value={access.mode} disabled={locked} onchange={changeAccessMode}
@@ -672,10 +737,12 @@
 						<FormActions busy={locked} disabled={!accessDirty} description={t('Rules by IP address already in the configuration are kept unchanged.')} />
 					</form>
 				</Card>
+				<DeviceRules {data} {svc} {locked} {write} devices={deviceRows} loading={devices === null && !devicesError} />
+			</div>
 			{/if}
 		</div>
 
-		<!-- 订阅与规则库 -->
+		<!-- 订阅 -->
 		<div id={`${tabsId}-panel-3`} role="tabpanel" aria-labelledby={`${tabsId}-tab-3`} hidden={section !== 'subscriptions'} tabindex="0">
 			<div class="stack">
 				<Card title={t('Subscriptions')}>
@@ -699,25 +766,10 @@
 					</div>
 				</Card>
 				<SubscriptionTools {data} {svc} {locked} {write} onshow={showSource} status={subStatus} />
-				<Card title={t('Routing rule data')}>
-					<p class="muted lead">{t('Address and domain lists that decide what goes direct. Updating downloads the latest lists.')}</p>
-					{#if resourcesError}<Feedback tone="error" message={t('Rule data versions could not be read: %s', resourcesError)} onretry={loadResources} compact />{/if}
-					<ul class="resources">
-						{#each RESOURCES as r}
-							<li data-resource={r}>
-								<div class="resource-copy">
-									<strong>{resourceLabel(r)}</strong>
-									<span class="muted">{[resourcesError ? t('Unknown') : resources === null ? t('Loading…') : resources[r] ? t('Version %s', versionText(resources[r])) : t('Not downloaded'), resourceResult[r] ? resultText(resourceResult[r]) : ''].filter(Boolean).join(' · ')}</span>
-								</div>
-								<Button size="compact" disabled={locked} onclick={() => updateResource(r)}>{resourceBusy === r ? t('Updating…') : t('Update')}</Button>
-							</li>
-						{/each}
-					</ul>
-				</Card>
 			</div>
 		</div>
 
-		<!-- sing-box 核心 -->
+		<!-- sing-box：核心状态、日志、更新、功能支持 -->
 		<div id={`${tabsId}-panel-4`} role="tabpanel" aria-labelledby={`${tabsId}-tab-4`} hidden={section !== 'core'} tabindex="0">
 			<div class="stack">
 				<Card title="sing-box">
@@ -732,16 +784,34 @@
 						<Button disabled={locked || !data.enabled || coreUpdate?.kind === 'running'} onclick={() => confirmRestart = true}>{restarting ? t('Restarting…') : t('Restart')}</Button>
 					</div>
 				</Card>
-				<Card title={t('Supported features')}>
-					<ul class="resources">
-						{#each CORE_FEATURES as f}
-							{@const ok = !!data.features[f]}
-							<li data-feature={f} data-ok={ok ? 'yes' : 'no'}>
-								<div class="resource-copy"><strong>{featureLabel(f)}</strong><span class="muted">{featureText(f, ok)}</span></div>
-								<Badge tone={ok ? 'success' : 'danger'}>{ok ? t('Available') : t('Missing')}</Badge>
-							</li>
-						{/each}
-					</ul>
+				<Card title={t('Logs')}>
+					<div class="log-anchor" data-hp-logs></div>
+					<div class="log-tools">
+						<Tabs id={logTabsId} label={t('Logs')} size="compact" items={LOGS.map(l => ({ value: l, label: l === 'homeproxy' ? t('Service') : 'sing-box' }))} bind:value={logName} />
+						<span class="log-actions">
+							{#if logName === 'sing-box-c'}
+								<Select size="compact" bind:value={logLevel} disabled={locked} aria-label={t('Log level')} title={t('Changing the level reloads HomeProxy. Use info or debug while troubleshooting, then set it back to warn.')}
+									onchange={e => setLogLevel(e.currentTarget.value)} data-hp-log-level>
+									{#each LOG_LEVELS as l}<option value={l}>{logLevelLabel(l)}</option>{/each}
+									{#if !LOG_LEVELS.includes(data.logLevel)}<option value={data.logLevel}>{data.logLevel}</option>{/if}
+								</Select>
+							{/if}
+							<span class="follow"><Switch checked={follow} aria-label={t('Follow')} onchange={on => follow = on} /><span aria-hidden="true">{t('Follow')}</span></span>
+							<Button size="compact" onclick={() => confirmClean = true} disabled={locked || !logText}>{t('Clear log')}</Button>
+							<Button size="compact" onclick={loadLog} disabled={logText === undefined}>{t('Refresh')}</Button>
+						</span>
+					</div>
+					{#each LOGS as l, index (l)}
+						<div id={`${logTabsId}-panel-${index}`} role="tabpanel" aria-labelledby={`${logTabsId}-tab-${index}`} hidden={logName !== l}>
+							{#if logName === l}
+								{#if logError}<Feedback tone="error" message={t('Log could not be read: %s', logError)} onretry={loadLog} compact />
+								{:else if logText === undefined}<Feedback tone="loading" message={t('Loading…')} compact />
+								{:else if logText === null}<Feedback tone="empty" message={t('No log yet. It appears after the service has run.')} compact />
+								{:else if !logText.trim()}<Feedback tone="empty" message={t('Log is empty')} compact />
+								{:else}<LogView text={logText} label={t('Log contents')} tail />{/if}
+							{/if}
+						</div>
+					{/each}
 				</Card>
 				<Card title={t('Updates')}>
 					{#if !coreUpdate}<Feedback tone="loading" message={t('Loading…')} compact />
@@ -758,32 +828,18 @@
 						<p class="muted core-note">{t('Updates come from the device’s package sources. If the proxy stops working after an update, the reason is shown at the top of this page.')}</p>
 					{/if}
 				</Card>
+				<Card title={t('Supported features')}>
+					<ul class="resources">
+						{#each CORE_FEATURES as f}
+							{@const ok = !!data.features[f]}
+							<li data-feature={f} data-ok={ok ? 'yes' : 'no'}>
+								<div class="resource-copy"><strong>{featureLabel(f)}</strong><span class="muted">{featureText(f, ok)}</span></div>
+								<Badge tone={ok ? 'success' : 'danger'}>{ok ? t('Available') : t('Missing')}</Badge>
+							</li>
+						{/each}
+					</ul>
+				</Card>
 			</div>
-		</div>
-
-		<!-- 日志 -->
-		<div id={`${tabsId}-panel-5`} role="tabpanel" aria-labelledby={`${tabsId}-tab-5`} hidden={section !== 'logs'} tabindex="0">
-			<Card>
-				<div class="log-tools">
-					<Tabs id={logTabsId} label={t('Logs')} size="compact" items={LOGS.map(l => ({ value: l, label: l === 'homeproxy' ? t('Service') : 'sing-box' }))} bind:value={logName} />
-					<span class="log-actions">
-						<span class="follow"><Switch checked={follow} aria-label={t('Follow')} onchange={on => follow = on} /><span aria-hidden="true">{t('Follow')}</span></span>
-						<Button size="compact" onclick={() => confirmClean = true} disabled={locked || !logText}>{t('Clear log')}</Button>
-						<Button size="compact" onclick={loadLog} disabled={logText === undefined}>{t('Refresh')}</Button>
-					</span>
-				</div>
-				{#each LOGS as l, index (l)}
-					<div id={`${logTabsId}-panel-${index}`} role="tabpanel" aria-labelledby={`${logTabsId}-tab-${index}`} hidden={logName !== l}>
-						{#if logName === l}
-							{#if logError}<Feedback tone="error" message={t('Log could not be read: %s', logError)} onretry={loadLog} compact />
-							{:else if logText === undefined}<Feedback tone="loading" message={t('Loading…')} compact />
-							{:else if logText === null}<Feedback tone="empty" message={t('No log yet. It appears after the service has run.')} compact />
-							{:else if !logText.trim()}<Feedback tone="empty" message={t('Log is empty')} compact />
-							{:else}<LogView text={logText} label={t('Log contents')} tail />{/if}
-						{/if}
-					</div>
-				{/each}
-			</Card>
 		</div>
 
 		<Drawer error={drawerError} open={!!nodeEditing} title={nodeEditing?.id ? t('Edit node %s', nodeEditing.label) : t('Add node')} onclose={closeNode}>
@@ -847,6 +903,9 @@
 	.log-actions { display: flex; align-items: center; gap: var(--sp-2); }
 	.follow { display: inline-flex; align-items: center; gap: var(--sp-1); margin-right: var(--sp-2); font-size: var(--fs-sm); }
 	.sub-status { margin: var(--sp-3) 0 0; }
+	.group { margin: 0; padding-top: var(--sp-2); font-size: var(--fs-base); font-weight: var(--fw-semibold); color: var(--heading-color); }
+	.advanced { display: flex; flex-direction: column; gap: var(--sp-5); padding-top: var(--sp-2); }
+	.log-anchor { scroll-margin-top: var(--sp-6); }
 	.core { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-4); flex-wrap: wrap; }
 	.core :global(.dl) { flex: 1; min-width: min(100%, 28rem); }
 	.core-update { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); flex-wrap: wrap; margin-bottom: var(--sp-3); font-size: var(--fs-sm); }

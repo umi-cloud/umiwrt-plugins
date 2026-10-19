@@ -5,7 +5,11 @@
  * 编译特性、重启、经 apk 检查与更新）、日志。服务端不在页面范围内。
  * 配置写入会话暂存（页面保存后立即带回滚应用）；订阅/规则库更新、连通性检查、清空日志为即时操作。
  * 关闭代理即 main_node = 'nil'（后端约定的「禁用」）；自定义分流模式下主节点不生效，开关对应 routing.default_outbound。
- * 设备访问控制只管按 MAC 的名单（lan_proxy_mac_addrs / lan_direct_mac_addrs），按 IP 的名单原样保留。
+ * 设备访问控制只管按 MAC 的名单（lan_proxy_mac_addrs / lan_direct_mac_addrs，以及按设备规则 lan_gaming_mode_mac_addrs /
+ * lan_global_proxy_mac_addrs），按 IP 的名单原样保留。
+ * 走代理的端口（routing_port）：common 为 infra.common_port 里的常用端口，删除该项即全部端口，其余为逗号分隔的端口或范围；
+ * 防火墙在分流判断之后按它过滤，自定义分流模式下同样生效。
+ * IPv6（ipv6_support，缺省按关闭处理）：关闭时防火墙只接管 IPv4，代理的 DNS 只返回 IPv4 地址，直接发出的 IPv6 连接不经代理。
  */
 import { probe, readFile, isIPv4, isIPv6, isHostname, isMac, toList as list, ignoreNotFound } from '@sight/sdk/lib';
 
@@ -113,6 +117,46 @@ export function coreUpdateState(r) {
 }
 
 export const ACCESS = ['disabled', 'listed_only', 'except_listed'];
+/*
+ * 按设备的规则：gaming（游戏模式）该设备走代理的流量不受端口限制；global（全局代理）不按分流模式区分、全部走代理，
+ * 自定义分流下不生效。两个名单都有同一设备时防火墙先匹配全局代理，所以每台设备只取一种
+ */
+export const DEVICE_RULES = ['gaming', 'global'];
+/** 纯函数：已保存的按设备规则（MAC 大写，全局代理优先） */
+export function deviceRules(access) {
+	const global = access.globalMacs || [];
+	return [...global.map(mac => ({ mac, rule: 'global' })), ...(access.gamingMacs || []).filter(m => !global.includes(m)).map(mac => ({ mac, rule: 'gaming' }))];
+}
+/** 纯函数：按设备规则的写入计划；空名单用 delete */
+export function planDeviceRules(rules) {
+	const values = {}, remove = [];
+	for (const [rule, key] of [['gaming', 'lan_gaming_mode_mac_addrs'], ['global', 'lan_global_proxy_mac_addrs']]) {
+		const macs = rules.filter(r => r.rule === rule).map(r => r.mac.toUpperCase());
+		if (macs.length) values[key] = macs; else remove.push(key);
+	}
+	return { values, remove };
+}
+
+export const PORT_CHOICES = ['common', 'all', 'custom'];
+export const DEFAULT_COMMON_PORTS = '22,53,80,143,443,465,587,853,873,993,995,8080,8443,9418';
+const portItems = v => String(v || '').split(',').map(p => p.trim()).filter(Boolean);
+/** 纯函数：逗号分隔的端口或范围（如 443,8000-9000） */
+export function isPortList(v) {
+	const items = portItems(v);
+	return items.length > 0 && items.every(p => {
+		const m = p.match(/^(\d{1,5})(?:-(\d{1,5}))?$/);
+		if (!m) return false;
+		const a = Number(m[1]), b = m[2] === undefined ? a : Number(m[2]);
+		return a >= 1 && b <= 65535 && a <= b;
+	});
+}
+/** 纯函数：走代理端口的写入计划；全部端口即删除 routing_port */
+export function planPorts(choice, custom) {
+	if (choice === 'all') return { values: {}, remove: ['routing_port'] };
+	return { values: { routing_port: choice === 'common' ? 'common' : portItems(custom).join(',') }, remove: [] };
+}
+/* sing-box 日志级别，默认 warn；排查问题时临时调高 */
+export const LOG_LEVELS = ['error', 'warn', 'info', 'debug'];
 /* 预置 DNS 与上游 HomeProxy 的选项一致；wan 表示使用上联下发的 DNS */
 export const DNS_PRESETS = ['wan', '1.1.1.1', '8.8.8.8', '208.67.222.222', '223.5.5.5', '119.29.29.29'];
 export const CHINA_DNS_PRESETS = ['wan', '223.5.5.5', '119.29.29.29', '210.2.4.8'];
@@ -141,7 +185,14 @@ export function shape(cfg, services) {
 			mode: ACCESS.includes(control.lan_proxy_mode) ? control.lan_proxy_mode : 'disabled',
 			proxyMacs: list(control.lan_proxy_mac_addrs).map(m => m.toUpperCase()),
 			directMacs: list(control.lan_direct_mac_addrs).map(m => m.toUpperCase()),
+			gamingMacs: list(control.lan_gaming_mode_mac_addrs).map(m => m.toUpperCase()),
+			globalMacs: list(control.lan_global_proxy_mac_addrs).map(m => m.toUpperCase()),
 		},
+		ports: !config.routing_port ? 'all' : config.routing_port === 'common' ? 'common' : 'custom',
+		portsCustom: config.routing_port && config.routing_port !== 'common' ? config.routing_port : '',
+		commonPorts: cfg.infra?.common_port || DEFAULT_COMMON_PORTS,
+		logLevel: config.log_level || 'warn',
+		ipv6: config.ipv6_support === '1',
 		subscriptions: list(sub.subscription_url),
 		autoUpdate: sub.auto_update === '1', viaProxy: sub.update_via_proxy === '1',
 		allowInsecure: sub.allow_insecure === '1', packetEncoding: sub.packet_encoding || '',
@@ -169,6 +220,7 @@ export function isDnsServer(v) {
 export function validateRouting(r, nodes) {
 	const e = [];
 	if (!MODES.includes(r.mode) && r.mode !== 'custom') e.push('Unknown routing mode');
+	if (r.ports === 'custom' && !isPortList(r.portsCustom)) e.push('Enter ports such as 443 or 8000-9000, separated by commas');
 	/* 自定义模式的出站与 DNS 在自定义分流里管理 */
 	if (r.mode === 'custom') return e;
 	if (!['same', OFF].includes(r.udpNode) && !nodes.some(n => n.id === r.udpNode)) e.push('Choose a UDP node');
@@ -252,6 +304,26 @@ export function createHomeProxy(client, uci) {
 			if (MODES.includes(r.mode)) values.routing_mode = r.mode;
 			if (r.mode === 'bypass_mainland_china') values.china_dns_server = r.chinaDnsServer.trim();
 			await uci.set('homeproxy', 'config', values);
+			if (r.ports) await this.saveTraffic(r);
+		},
+		/** 走代理的端口与 IPv6，两种分流方式通用；自定义分流模式下单独保存 */
+		async saveTraffic(r) {
+			if (!PORT_CHOICES.includes(r.ports)) throw new Error('Unknown port choice');
+			if (r.ports === 'custom' && !isPortList(r.portsCustom)) throw new Error('Invalid port list');
+			const { values, remove } = planPorts(r.ports, r.portsCustom);
+			if (typeof r.ipv6 === 'boolean') values.ipv6_support = r.ipv6 ? '1' : '0';
+			if (Object.keys(values).length) await uci.set('homeproxy', 'config', values);
+			if (remove.length) await drop('homeproxy', 'config', remove);
+		},
+		async setLogLevel(level) {
+			if (!LOG_LEVELS.includes(level)) throw new Error('Unknown log level');
+			await uci.set('homeproxy', 'config', { log_level: level });
+		},
+		async saveDeviceRules(rules) {
+			if (!rules.every(r => isMac(r.mac) && DEVICE_RULES.includes(r.rule))) throw new Error('Invalid device rule');
+			const { values, remove } = planDeviceRules(rules);
+			if (Object.keys(values).length) await uci.set('homeproxy', 'control', values);
+			if (remove.length) await drop('homeproxy', 'control', remove);
 		},
 		async saveAccess(mode, macs) {
 			if (!ACCESS.includes(mode)) throw new Error('Unknown access mode');

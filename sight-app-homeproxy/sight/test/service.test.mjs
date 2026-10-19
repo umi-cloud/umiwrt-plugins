@@ -39,10 +39,10 @@ test('写入：关闭写 nil；未知模式/站点/日志拒绝；清空订阅�
 
 test('整形：UDP 节点、DNS、访问控制名单（MAC 统一大写）、订阅选项', () => {
 	const d = shape({ ...cfg, config: { ...cfg.config, main_udp_node: 'nil', dns_server: 'tls://1.1.1.1' },
-		control: { lan_proxy_mode: 'listed_only', lan_proxy_mac_addrs: ['aa:bb:cc:dd:ee:ff'], lan_direct_mac_addrs: 'aa:aa:aa:aa:aa:aa' },
+		control: { lan_proxy_mode: 'listed_only', lan_proxy_mac_addrs: ['aa:bb:cc:dd:ee:ff'], lan_direct_mac_addrs: 'aa:aa:aa:aa:aa:aa', lan_gaming_mode_mac_addrs: ['aa:00:00:00:00:01'] },
 		subscription: { ...cfg.subscription, auto_update: '1', allow_insecure: '1', packet_encoding: 'xudp' } }, {});
 	assert.deepEqual([d.udpNode, d.dnsServer, d.chinaDnsServer], ['nil', 'tls://1.1.1.1', '223.5.5.5']);
-	assert.deepEqual(d.access, { mode: 'listed_only', proxyMacs: ['AA:BB:CC:DD:EE:FF'], directMacs: ['AA:AA:AA:AA:AA:AA'] });
+	assert.deepEqual(d.access, { mode: 'listed_only', proxyMacs: ['AA:BB:CC:DD:EE:FF'], directMacs: ['AA:AA:AA:AA:AA:AA'], gamingMacs: ['AA:00:00:00:00:01'], globalMacs: [] });
 	assert.deepEqual([d.autoUpdate, d.viaProxy, d.allowInsecure, d.packetEncoding], [true, false, true, 'xudp']);
 	assert.equal(shape({ control: { lan_proxy_mode: 'weird' } }, {}).access.mode, 'disabled');
 });
@@ -221,4 +221,39 @@ test('核心更新状态：不支持、未检查、进行中、有新版、已�
 	/* 更新时已是最新：版本没变 */
 	assert.equal(coreUpdateState({ supported: true, task: { action: 'upgrade', state: 'done', finished: 9, from: 'a', current: 'a' } }).kind, 'latest');
 	assert.deepEqual(coreUpdateState({ supported: true, task: { action: 'upgrade', state: 'failed', code: 1 }, output: 'ERROR: x' }), { kind: 'failed', action: 'upgrade', output: 'ERROR: x' });
+});
+
+test('走代理的端口：常用、全部（未设置）、自定义；校验端口与范围；全部端口用 delete', async () => {
+	const { isPortList, planPorts } = await import('../src/service.js');
+	assert.deepEqual([shape(cfg, {}).ports, shape({ ...cfg, config: { routing_port: 'common' } }, {}).ports], ['all', 'common']);
+	const c = shape({ ...cfg, config: { routing_port: '443,8000-9000' }, infra: { common_port: '80,443' } }, {});
+	assert.deepEqual([c.ports, c.portsCustom, c.commonPorts, c.logLevel, c.ipv6], ['custom', '443,8000-9000', '80,443', 'warn', false]);
+	assert.equal(shape({ ...cfg, config: { ipv6_support: '1' } }, {}).ipv6, true);
+	assert.ok(isPortList('443') && isPortList(' 80, 443 ,8000-9000') && isPortList('1-65535'));
+	assert.ok(!isPortList('') && !isPortList('0') && !isPortList('70000') && !isPortList('9000-8000') && !isPortList('80;443') && !isPortList('http'));
+	assert.deepEqual(planPorts('all'), { values: {}, remove: ['routing_port'] });
+	assert.deepEqual(planPorts('common', 'x'), { values: { routing_port: 'common' }, remove: [] });
+	assert.deepEqual(planPorts('custom', ' 80, 443,,8000-9000 '), { values: { routing_port: '80,443,8000-9000' }, remove: [] });
+	assert.deepEqual(validateRouting({ mode: 'custom', ports: 'custom', portsCustom: '80;443' }, []), ['Enter ports such as 443 or 8000-9000, separated by commas']);
+
+	const calls = [];
+	const uci = { set: async (...a) => calls.push(['set', ...a]), remove: async (...a) => calls.push(['remove', ...a]) };
+	const svc = createHomeProxy({ call: async () => ({}) }, uci);
+	await svc.saveRouting({ mode: 'global', udpNode: 'same', dnsServer: '8.8.8.8', ports: 'all', ipv6: false });
+	assert.deepEqual(calls, [['set', 'homeproxy', 'config', { main_udp_node: 'same', dns_server: '8.8.8.8', routing_mode: 'global' }],
+		['set', 'homeproxy', 'config', { ipv6_support: '0' }], ['remove', 'homeproxy', 'config', ['routing_port']]]);
+	await assert.rejects(svc.saveTraffic({ ports: 'custom', portsCustom: 'x' }), /Invalid port list/);
+	await assert.rejects(svc.setLogLevel('trace'), /Unknown log level/);
+});
+
+test('按设备规则：全局代理优先；写入只动按 MAC 的两个名单，空名单用 delete', async () => {
+	const { deviceRules, planDeviceRules } = await import('../src/service.js');
+	assert.deepEqual(deviceRules({ gamingMacs: ['A', 'B'], globalMacs: ['B', 'C'] }), [{ mac: 'B', rule: 'global' }, { mac: 'C', rule: 'global' }, { mac: 'A', rule: 'gaming' }]);
+	assert.deepEqual(planDeviceRules([{ mac: 'aa:bb:cc:dd:ee:01', rule: 'gaming' }]), { values: { lan_gaming_mode_mac_addrs: ['AA:BB:CC:DD:EE:01'] }, remove: ['lan_global_proxy_mac_addrs'] });
+	const calls = [];
+	const uci = { set: async (...a) => calls.push(['set', ...a]), remove: async (...a) => calls.push(['remove', ...a]) };
+	const svc = createHomeProxy({ call: async () => ({}) }, uci);
+	await svc.saveDeviceRules([]);
+	assert.deepEqual(calls, [['remove', 'homeproxy', 'control', ['lan_gaming_mode_mac_addrs', 'lan_global_proxy_mac_addrs']]]);
+	await assert.rejects(svc.saveDeviceRules([{ mac: 'nope', rule: 'gaming' }]), /Invalid device rule/);
 });
