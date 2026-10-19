@@ -71,15 +71,17 @@
 	const PAUSE_OPTIONS = [5, 15, 30, 60, 120];
 	const PAUSE_KEY = 'sight-adblock-pause';
 	const storedPause = () => { try { return Number(localStorage.getItem(PAUSE_KEY)); } catch { return 0; } };
-	let pauseMinutes = $state(PAUSE_OPTIONS.includes(storedPause()) ? storedPause() : 15);
+	let pauseMinutes = $state(PAUSE_OPTIONS.find(m => m === storedPause()) ?? 15);
 	const pauseLabel = m => m < 60 ? t('%d min', m) : t('%d h', m / 60);
-	/* 操作结果由状态行体现（正在更新、已暂停…），不另给成功提示 */
+
+	/* 服务操作：结果由状态行体现（正在更新、已暂停…），不另给成功提示；结束后回读状态 */
 	async function runAction(action) {
 		busy = true; error = '';
 		try { await action(); }
 		catch (e) { if (alive) error = errorText(e); }
 		finally { if (alive) { busy = false; await load(); } }
 	}
+	const update = () => runAction(() => svc.update());
 	function pause() {
 		try { localStorage.setItem(PAUSE_KEY, String(pauseMinutes)); } catch { /* 记不住只影响下次的默认值 */ }
 		return runAction(() => svc.pause(pauseMinutes));
@@ -125,39 +127,32 @@
 	const removeList = l => { form.lists = form.lists.filter(x => x !== l); };
 	const listKey = l => l.section || `new:${l.url}`;
 
-	async function toggle(on) {
-		if (locked) return;
-		const ok = await saveFlow(() => svc.setEnabled(on), {
+	/* 写入暂存并带回滚应用，返回是否已确认生效 */
+	async function apply(write) {
+		const ok = await saveFlow(write, {
 			busy: v => { busy = v; if (v) error = ''; },
 			fail: e => { error = errorText(e); },
 			alive: () => alive,
 		});
-		if (!ok || !alive || pending.phase !== 'confirmed') return;
-		busy = true;
-		try { await svc.afterToggle(on); }
-		catch (e) { if (alive) error = errorText(e); }
-		finally { if (alive) { busy = false; await load(); } }
+		return ok && alive && pending.phase === 'confirmed';
 	}
 
-	const update = () => runAction(() => svc.update());
+	async function toggle(on) {
+		if (locked) return;
+		if (await apply(() => svc.setEnabled(on))) await runAction(() => svc.afterToggle(on));
+	}
 
 	async function save(event) {
 		event.preventDefault();
 		if (locked) return;
 		errors = validate(form).map(m => ({ text: t(m), field: 'adblock-blocked' }));
 		if (errors.length) { await tick(); summary?.focus(); return; }
-		const paused = data.status.paused;
-		const ok = await saveFlow(() => svc.save(data.config, form), {
-			busy: v => { busy = v; if (v) error = ''; },
-			fail: e => { error = errorText(e); },
-			alive: () => alive,
-		});
+		const { paused, state } = data.status;
+		if (!await apply(() => svc.save(data.config, form)) || !data.config.enabled) return;
 		/* 正常运行时 adblock-fast 已注册配置触发器，应用后由 procd 自行重载；启动失败（如此前没有任何列表）时
-		   没有触发器，须主动重启。两种情况只取其一，避免两次运行重叠 */
-		if (!ok || !alive || pending.phase !== 'confirmed' || !data.config.enabled) return;
-		/* 暂停中保存：取消暂停后按新配置重新生成 */
+		   没有触发器，须主动重启；暂停中先取消暂停再按新配置重新生成。只取其一，避免两次运行重叠 */
 		if (paused) await runAction(async () => { await svc.resume(); await svc.update(); });
-		else if (data.status.state !== 'running') await update();
+		else if (state !== 'running') await update();
 	}
 </script>
 
@@ -313,11 +308,11 @@
 			<Dialog open title={t('Add a list')} confirmLabel={t('Add')} cancelLabel={t('Cancel')} onconfirm={addList} onclose={() => adding = null}>
 				<form class="add" onsubmit={addList} aria-label={t('Add a list')}>
 					<p class="muted">{t('Use a list of domains, one per line, or a hosts file. The list is downloaded when you save.')}</p>
-					<Field id="adblock-list-url" label={t('Address')} error={t(addErrors.url || '')}>
+					<Field id="adblock-list-url" label={t('Address')} error={addErrors.url ? t(addErrors.url) : ''}>
 						<Input id="adblock-list-url" type="url" bind:value={adding.url} placeholder="https://example.com/list.txt" autocomplete="off" spellcheck="false"
 							aria-invalid={!!addErrors.url} aria-describedby={addErrors.url ? 'adblock-list-url-error' : undefined} />
 					</Field>
-					<Field id="adblock-list-name" label={t('Name (optional)')} error={t(addErrors.name || '')}>
+					<Field id="adblock-list-name" label={t('Name (optional)')} error={addErrors.name ? t(addErrors.name) : ''}>
 						<Input id="adblock-list-name" bind:value={adding.name} autocomplete="off" aria-invalid={!!addErrors.name} />
 					</Field>
 					<RadioGroup name="adblock-list-action" label={t('Type')} bind:value={adding.action}

@@ -2,14 +2,16 @@
 /*
  * 广告过滤插件真实流程验收，需在装有 sight-ui、adblock-fast 与本插件的专用容器运行（需能联网下载拦截列表）。
  *   1. ACL：页面所需权限来自本包；sight-ui 组不能读写 adblock-fast 配置
- *   2. 开启后没有任何列表时如实说明原因；开启一个小列表、加一条自定义拦截并自加一个列表（容器内 uhttpd 提供），
+ *   2. 默认列表：去掉 adblock-fast 自带、未开启的预置列表，换成 anti-AD（预先勾选）与 adblockfilters Lite，只做一次
+ *   3. 开启后没有任何列表时如实说明原因；开启一个小列表、加一条自定义拦截并自加一个列表（容器内 uhttpd 提供），
  *      保存应用后状态为拦截中，路由器的 DNS 对自定义域名不再返回真实地址；强制 DNS 开关写入配置
- *   3. 域名检查：子域名按上级规则判为拦截、自加列表里的域名被拦截、未拦截的域名可一键加入「始终拦截」草稿
- *   4. 限时暂停：服务停止并显示暂停，立即恢复后重新拦截；移除自加列表后配置里删掉该段
- *   5. 自动更新：每周计划写入 crontab（与 luci-app-adblock-fast 同格式），关闭后删除，其它任务保留
- *   6. 结束时恢复原配置与 crontab、停止服务
+ *   4. 域名检查：子域名按上级规则判为拦截、自加列表里的域名被拦截、未拦截的域名可一键加入「始终拦截」草稿
+ *   5. 限时暂停：服务停止并显示暂停，立即恢复后重新拦截；移除自加列表后配置里删掉该段
+ *   6. 自动更新：每周计划写入 crontab（与 luci-app-adblock-fast 同格式），关闭后删除，其它任务保留
+ *   7. 结束时恢复原配置与 crontab、停止服务
  *   SIGHT_UI=/path/to/sight-ui LUCI_URL=http://127.0.0.1:8152 CONTAINER=<专用容器> node sight/scripts/flow-check.mjs
  */
+import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -19,15 +21,32 @@ const { createFlow } = await import(pathToFileURL(resolve(SIGHT_UI, 'scripts/lib
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const { check, section, sleep, sh, ubus, denied, withAclUser, browser, finish } = await createFlow({ id: 'adblock-fast', outDir: join(ROOT, '.visual-out/flow') });
 
-/* 小列表：体积约 0.5 MB，下载与处理都快 */
-const SMALL = 'Kboghdady - YouTube Ads DNS';
+/* 小列表：体积约 150 KB，下载与处理都快 */
+const SMALL = '217heidai - adblockfilters Lite';
 const DOMAIN = 'sight-check-ads.example.com';
 /* 自加列表：由容器内 uhttpd 提供 */
 const LIST_URL = 'http://127.0.0.1/sight-flow-list.txt', LIST_DOMAIN = 'sight-flow-list.example.com';
 /* 清掉以前运行留下的缓存，否则没有列表时也会恢复出旧的拦截表 */
 sh(`echo ${LIST_DOMAIN} > /www/sight-flow-list.txt`);
 sh('mkdir -p /etc/crontabs; touch /etc/crontabs/root; cp /etc/crontabs/root /root/crontab.bak; echo "*/5 * * * * /usr/bin/hand-written.sh" >> /etc/crontabs/root; cp /etc/config/adblock-fast /root/adblock-fast.bak; /etc/init.d/adblock-fast stop >/dev/null 2>&1; /etc/init.d/adblock-fast killcache >/dev/null 2>&1; uci set adblock-fast.config.enabled=0; uci commit adblock-fast; /etc/init.d/dnsmasq start >/dev/null 2>&1; true');
-const listSection = sh(`uci -X show adblock-fast | sed -n "s/^adblock-fast\\.\\([^.]*\\)\\.name='${SMALL}'$/\\1/p"`).trim();
+
+section('默认列表');
+/* 模拟首次安装：预置列表全部未开启、未做过替换，再执行本包的 uci-defaults */
+const DEFAULTS = readFileSync(join(ROOT, '../root/etc/uci-defaults/95-sight-adblock-fast-lists'), 'utf8');
+const runDefaults = () => sh(`cat > /tmp/sight-lists.sh <<'SIGHT_EOF'\n${DEFAULTS}\nSIGHT_EOF\nsh /tmp/sight-lists.sh; rm -f /tmp/sight-lists.sh`);
+const sectionOf = name => sh(`uci -X show adblock-fast | sed -n "s/^adblock-fast\\.\\([^.]*\\)\\.name='${name}'$/\\1/p"`).trim();
+sh(`for s in $(uci -X show adblock-fast | sed -n "s/^adblock-fast\\.\\([^.=]*\\)=file_url$/\\1/p"); do uci set adblock-fast.$s.enabled=0; done; uci -q delete adblock-fast.config.sight_lists; uci commit adblock-fast`);
+runDefaults();
+const names = () => sh(`uci -X show adblock-fast | sed -n "s/^adblock-fast\\.\\([^.]*\\)\\.name='\\(.*\\)'$/\\2/p"`).trim().split('\n');
+const lists = names();
+check(lists.includes('anti-AD') && lists.includes(SMALL) && !lists.some(n => /Hagezi|OISD|StevenBlack|AdguardTeam/.test(n)), '自带的预置列表换成国内列表', lists.join(', '));
+const antiAd = sectionOf('anti-AD');
+check(sh(`uci get adblock-fast.${antiAd}.enabled`).trim() === '1' && sh('uci get adblock-fast.config.sight_lists').trim() === '1', '预先勾选 anti-AD 并记下已替换');
+sh(`uci set adblock-fast.${antiAd}.enabled=0; uci commit adblock-fast`);
+runDefaults();
+check(sh(`uci get adblock-fast.${antiAd}.enabled`).trim() === '0' && names().length === lists.length, '再次执行不改动用户的选择');
+
+const listSection = sectionOf(SMALL);
 
 section('ACL');
 await withAclUser(['sight-ui'], async sid => check(denied(await ubus(sid, 'uci', 'get', { config: 'adblock-fast' })), '只有 sight-ui 组的账号不能读取广告过滤配置'));

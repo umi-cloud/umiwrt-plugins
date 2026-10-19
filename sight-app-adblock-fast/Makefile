@@ -2,11 +2,12 @@
 #
 # 广告过滤的 Sight 页面与权限：服务本身由 adblock-fast 提供；状态读 procd 服务数据，启停用宿主的 sight.setInitAction；
 # 域名检查与限时暂停由本包的 rpcd 对象 sight.adblock-fast 提供。
+# 安装时一次性把默认拦截列表换成国内常用的（uci-defaults/95-sight-adblock-fast-lists）。
 
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=sight-app-adblock-fast
-PKG_VERSION:=1.2.0
+PKG_VERSION:=1.3.0
 PKG_RELEASE:=1
 
 PKG_LICENSE:=GPL-2.0-only

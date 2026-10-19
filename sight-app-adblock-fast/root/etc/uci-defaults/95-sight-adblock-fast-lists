@@ -1,0 +1,66 @@
+#!/bin/sh
+# 默认拦截列表换成国内常用的：去掉 adblock-fast 自带、未开启的预置列表，加入 anti-AD 与 adblockfilters Lite。
+# 已开启的列表和用户自己加的列表不动；没有任何列表开启时预先勾选 anti-AD（总开关仍由用户打开）。
+# 标记 adblock-fast.config.sight_lists 保证只做一次，之后用户删掉或改动的列表不会被加回来。
+# 排在 adblock-fast 自己的 90-adblock-fast 之后执行。
+
+pkg=adblock-fast
+uci -q get $pkg.config >/dev/null || exit 0
+[ "$(uci -q get $pkg.config.sight_lists)" = 1 ] && exit 0
+
+. /lib/functions.sh
+
+# adblock-fast 1.2.4 默认配置里的预置列表地址
+UPSTREAM='
+https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/wildcard/pro-onlydomains.txt
+https://raw.githubusercontent.com/AdguardTeam/cname-trackers/master/data/combined_disguised_trackers_justdomains.txt
+https://big.oisd.nl/
+https://cdn.jsdelivr.net/gh/StevenBlack/hosts/hosts
+https://o0.pages.dev/Lite/domains.txt
+https://cdn.jsdelivr.net/gh/bongochong/CombinedPrivacyBlockLists/NoFormatting/cpbl-ctld.txt
+https://hole.cert.pl/domains/v2/domains.txt
+https://cdn.jsdelivr.net/gh/kboghdady/youTube_ads_4_pi-hole/black.list
+https://raw.githubusercontent.com/AdguardTeam/cname-trackers/master/data/combined_disguised_clickthroughs_justdomains.txt
+https://someonewhocares.org/hosts/hosts
+https://winhelp2002.mvps.org/hosts.txt
+https://adaway.org/hosts.txt
+https://raw.githubusercontent.com/AdguardTeam/cname-trackers/master/data/combined_disguised_ads_justdomains.txt
+https://raw.githubusercontent.com/AdguardTeam/cname-trackers/master/data/combined_disguised_microsites_justdomains.txt
+https://pgl.yoyo.org/as/serverlist.php?hostformat=hosts&showintro=1&mimetype=plaintext
+https://cdn.jsdelivr.net/gh/hoshsadiq/adblock-nocoin-list/hosts.txt
+'
+ANTIAD=https://anti-ad.net/domains.txt
+HEIDAI=https://gcore.jsdelivr.net/gh/217heidai/adblockfilters@main/rules/adblockdomainlite.txt
+
+urls='' on=0 drop=''
+scan() {
+	local url enabled
+	config_get url "$1" url
+	config_get enabled "$1" enabled 1
+	urls="$urls
+$url"
+	if [ "$enabled" = 1 ]; then on=1
+	elif printf '%s\n' "$UPSTREAM" | grep -qxF "$url"; then drop="$drop $1"
+	fi
+}
+config_load $pkg
+config_foreach scan file_url
+
+for s in $drop; do uci delete $pkg.$s; done
+
+add() {
+	printf '%s\n' "$urls" | grep -qxF "$2" && return
+	local s
+	s=$(uci add $pkg file_url)
+	uci set $pkg.$s.name="$1"
+	uci set $pkg.$s.url="$2"
+	uci set $pkg.$s.size="$3"
+	uci set $pkg.$s.action=block
+	uci set $pkg.$s.enabled="$4"
+}
+add 'anti-AD' "$ANTIAD" 2131091 $((1 - on))
+add '217heidai - adblockfilters Lite' "$HEIDAI" 147051 0
+
+uci set $pkg.config.sight_lists=1
+uci commit $pkg
+exit 0

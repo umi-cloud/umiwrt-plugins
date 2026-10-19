@@ -59,10 +59,10 @@ function pause_state() {
 	const end = int(trim(fs.readfile(DIR + '/until') || '0'));
 	if (!end) return null;
 	const pid = int(trim(fs.readfile(DIR + '/pid') || '0'));
-	const cmdline = pid ? fs.readfile(`/proc/${pid}/cmdline`) || '' : '';
-	const st = fs.stat(DIR + '/until');
-	if (index(cmdline, RUNNER) < 0 && !(st && time() - st.mtime < 10)) return null;
-	return { until: end, pid: index(cmdline, RUNNER) >= 0 ? pid : 0 };
+	const alive = pid && index(fs.readfile(`/proc/${pid}/cmdline`) || '', RUNNER) >= 0;
+	/* 刚写下截止时刻、后台进程还没记下 pid 的几秒内也算暂停 */
+	if (!alive && !(time() - (fs.stat(DIR + '/until')?.mtime ?? 0) < 10)) return null;
+	return { until: end, pid: alive ? pid : 0 };
 }
 
 function mem_available() {
@@ -87,20 +87,17 @@ const methods = {
 			const file = FILES[c.dns];
 			if (!file) return fail(req, STATUS.NOT_SUPPORTED);
 			if (!fs.access(file)) return fail(req, STATUS.NO_DATA);
-			const names = candidates(c.dns, domain), args = [];
-			for (let d in names) {
-				const l = lines(c.dns, d);
-				for (let s in [...l.block, ...(l.allow || [])]) push(args, '-e', shellquote(s));
-			}
+			const rules = map(candidates(c.dns, domain), (d) => ({ d, ...lines(c.dns, d) })), args = [];
+			for (let r in rules)
+				for (let s in [...r.block, ...(r.allow || [])]) push(args, '-e', shellquote(s));
 			const p = fs.popen(`grep -F -x ${join(' ', args)} ${shellquote(file)} 2>/dev/null`, 'r');
 			const found = {};
 			for (let s in split(p?.read('all') || '', '\n')) if (s) found[s] = true;
 			p?.close();
 			/* DNS 按最具体的规则生效 */
-			for (let d in names) {
-				const l = lines(c.dns, d);
-				for (let s in l.allow || []) if (found[s]) return { blocked: false, match: d };
-				for (let s in l.block) if (found[s]) return { blocked: true, match: d };
+			for (let r in rules) {
+				if (length(filter(r.allow || [], (s) => found[s]))) return { blocked: false, match: r.d };
+				if (length(filter(r.block, (s) => found[s]))) return { blocked: true, match: r.d };
 			}
 			return { blocked: false, match: null };
 		}

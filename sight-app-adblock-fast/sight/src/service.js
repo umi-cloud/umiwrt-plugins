@@ -3,7 +3,7 @@
  * adblock-fast 按配置变化自行重载；运行状态读 procd 服务数据（service list），启停与立即更新用宿主的 sight.setInitAction；
  * 域名检查、限时暂停与可用内存由本包的 sight.adblock-fast 提供。
  */
-import { toList as list, readFile } from '@sight/sdk/lib';
+import { toList as list, readFile, ignoreNotFound } from '@sight/sdk/lib';
 
 /* 自动更新：root crontab 里带 # adblock-fast-auto 标记的一行，格式与 luci-app-adblock-fast 相同（互认），
    命令 /etc/init.d/adblock-fast dl 重新下载全部列表；写入即生效（写文件后重启 cron），不走暂存 */
@@ -11,6 +11,7 @@ export const CRONTAB = '/etc/crontabs/root';
 const AUTO = '# adblock-fast-auto';
 const LINE = /^(\d{1,2}) (\d{1,2}) \* \* (\*|[0-6]) \/etc\/init\.d\/adblock-fast dl # adblock-fast-auto$/;
 const pad = n => String(n).padStart(2, '0');
+const flag = on => on ? '1' : '0';
 
 /** 纯函数：crontab → { mode: 'off'|'daily'|'weekly'|'other', time, day }；other 为 LuCI 写的其它频率，保留不改 */
 export function readSchedule(text) {
@@ -66,9 +67,6 @@ export function readStatus(service, extra = {}) {
 	return {
 		state: data.status ? (STATES[data.status] || 'working') : 'stopped',
 		entries: Number(data.entries) || 0,
-		message: data.message || '',
-		version: data.version || '',
-		forceDnsActive: !!data.force_dns_active,
 		problems: [...items(data.errors, 'error'), ...items(data.warnings, 'warning')],
 		paused: !!extra.paused,
 		remaining: Number(extra.remaining) || 0,
@@ -96,8 +94,7 @@ export function readConfig(cfg) {
 }
 
 export const DOMAIN = /^(\*\.)?([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z0-9-]{2,63}$/;
-
-export const LIST_URL = /^https?:\/\/[^\s/]+\S*$/;
+const LIST_URL = /^https?:\/\/[^\s/]+\S*$/;
 
 /** 校验要新加的列表：返回 { url?, name? } 错误消息键 */
 export function validateList(l, lists) {
@@ -136,7 +133,7 @@ export function plan(before, form) {
 	const ops = [];
 	const conf = { values: {}, remove: [] };
 	const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
-	if (form.forceDns !== before.forceDns) conf.values.force_dns = form.forceDns ? '1' : '0';
+	if (form.forceDns !== before.forceDns) conf.values.force_dns = flag(form.forceDns);
 	for (const [key, opt] of [['blocked', 'blocked_domain'], ['allowed', 'allowed_domain']]) {
 		if (same(form[key], before[key])) continue;
 		if (form[key].length) conf.values[opt] = form[key]; else conf.remove.push(opt);
@@ -145,21 +142,28 @@ export function plan(before, form) {
 	for (const old of before.lists) if (!form.lists.some(l => l.section === old.section)) ops.push({ op: 'delete', section: old.section });
 	for (const l of form.lists) {
 		const old = l.section && before.lists.find(x => x.section === l.section);
-		if (!l.section) ops.push({ op: 'add', type: 'file_url', values: { name: l.name, url: l.url, action: l.action, enabled: l.enabled ? '1' : '0' } });
-		else if (old && old.enabled !== l.enabled) ops.push({ op: 'set', section: l.section, values: { enabled: l.enabled ? '1' : '0' }, remove: [] });
+		if (!l.section) ops.push({ op: 'add', type: 'file_url', values: { name: l.name, url: l.url, action: l.action, enabled: flag(l.enabled) } });
+		else if (old && old.enabled !== l.enabled) ops.push({ op: 'set', section: l.section, values: { enabled: flag(l.enabled) }, remove: [] });
 	}
 	return ops;
 }
 
 export function createAdblock(client, uci) {
-	const initAction = (action) => client.call('sight', 'setInitAction', { name: 'adblock-fast', action });
+	const initAction = (action, name = 'adblock-fast') => client.call('sight', 'setInitAction', { name, action });
+	const rpc = (method, args) => client.call('sight.adblock-fast', method, args);
+	/* crontab 读不到（无权限）时不能当成空文件写回 */
+	const readCrontab = async () => {
+		const f = await readFile(client, CRONTAB);
+		if (f.state === 'denied') throw new Error('Permission denied');
+		return f.state === 'ok' ? f.data : '';
+	};
 	return {
 		/** 未安装 adblock-fast（配置不存在）时返回 null */
 		async load() {
 			const [cfg, svc, extra] = await Promise.all([
 				uci.load('adblock-fast').catch(e => { if (e?.kind === 'status' && e.status === 4) return null; throw e; }),
 				client.call('service', 'list', { name: 'adblock-fast' }).catch(() => ({})),
-				client.call('sight.adblock-fast', 'status'),
+				rpc('status'),
 			]);
 			if (!cfg) return null;
 			return { config: readConfig(cfg), status: readStatus(svc?.['adblock-fast'], extra) };
@@ -171,12 +175,12 @@ export function createAdblock(client, uci) {
 				else if (o.op === 'delete') await uci.remove('adblock-fast', o.section);
 				else {
 					if (Object.keys(o.values).length) await uci.set('adblock-fast', o.section, o.values);
-					if (o.remove.length) await uci.remove('adblock-fast', o.section, o.remove).catch(() => {});
+					if (o.remove.length) await uci.remove('adblock-fast', o.section, o.remove).catch(ignoreNotFound);
 				}
 			}
 		},
 		/** 开关：写 enabled 并应用后，启用并启动或停止并停用开机自启 */
-		async setEnabled(on) { await uci.set('adblock-fast', 'config', { enabled: on ? '1' : '0' }); },
+		async setEnabled(on) { await uci.set('adblock-fast', 'config', { enabled: flag(on) }); },
 		async afterToggle(on) {
 			/* 暂停中关闭时先取消暂停，免得到时又被启动 */
 			if (!on) await this.resume();
@@ -186,24 +190,18 @@ export function createAdblock(client, uci) {
 		/** 立即更新：重启服务，重新下载并生成拦截表 */
 		update: () => initAction('restart'),
 		/** 在当前生效的拦截表里查域名：{ blocked, match }；未生成拦截表时为状态 5 */
-		check: domain => client.call('sight.adblock-fast', 'check', { domain }),
+		check: domain => rpc('check', { domain }),
 		/** 暂停若干分钟，到时由后台进程重新启动 */
-		pause: minutes => client.call('sight.adblock-fast', 'pause', { minutes }),
+		pause: minutes => rpc('pause', { minutes }),
 		/** 只取消暂停，不启动服务 */
-		resume: () => client.call('sight.adblock-fast', 'resume'),
+		resume: () => rpc('resume'),
 		/** 提前恢复：取消暂停并启动服务 */
 		async resumeNow() { await this.resume(); await initAction('start'); },
-		async loadSchedule() {
-			const f = await readFile(client, CRONTAB);
-			if (f.state === 'denied') throw new Error('Permission denied');
-			return readSchedule(f.state === 'ok' ? f.data : '');
-		},
+		loadSchedule: async () => readSchedule(await readCrontab()),
 		/** 读最新内容再改，避免覆盖其他程序刚写入的任务 */
 		async saveSchedule(s) {
-			const f = await readFile(client, CRONTAB);
-			if (f.state === 'denied') throw new Error('Permission denied');
-			await client.call('file', 'write', { path: CRONTAB, data: buildSchedule(f.state === 'ok' ? f.data : '', s), mode: 0o600 });
-			await client.call('sight', 'setInitAction', { name: 'cron', action: 'restart' });
+			await client.call('file', 'write', { path: CRONTAB, data: buildSchedule(await readCrontab(), s), mode: 0o600 });
+			await initAction('restart', 'cron');
 		},
 	};
 }
