@@ -1,10 +1,10 @@
 {
 	"id": "docker",
 	"sdk": 1,
-	"version": "1.4.0+7845001c",
+	"version": "1.5.0+254f0c0f",
 	"path": "/docker",
 	"title": "Docker",
-	"description": "Run containers on the router: create, edit, update and open them, use a terminal, run Compose projects, manage images, networks and volumes, and set a registry mirror.",
+	"description": "Run containers on the router: create, edit and open them, see their CPU and memory use, check for and apply image updates, use a terminal, run Compose projects, manage images, networks, volumes and storage, and set a registry mirror.",
 	"icon": "container",
 	"group": "applications",
 	"package": "sight-app-docker",

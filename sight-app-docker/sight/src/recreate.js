@@ -3,7 +3,7 @@
  * 保留 Config / HostConfig / 网络 / 标签等全部原配置，去掉与旧镜像默认值相同的部分（新镜像的默认值随之生效）；
  * 匿名卷按名称接到新容器上，数据不丢。编辑时只替换表单负责的字段，其余原样保留。
  */
-import { splitCommand, createImage } from './service.js';
+import { splitCommand, createImage, parseDevice, deviceText, ownNetwork, isCustomNetwork } from './service.js';
 
 const clone = v => v === undefined ? undefined : JSON.parse(JSON.stringify(v));
 const same = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
@@ -101,6 +101,21 @@ export function joinCommand(args) {
 /** 纯函数：网络模式统一成表单的取值（default 即 bridge） */
 const formNetwork = mode => !mode || mode === 'default' ? 'bridge' : mode;
 
+const decimal = v => String(+v.toFixed(2));
+/** 纯函数：create 参数 → 表单的主机名、资源限制、设备与固定地址（CPU 上限也认 CpuQuota/CpuPeriod 的写法） */
+export function limitsOf(body) {
+	const host = body?.HostConfig || {};
+	const network = formNetwork(host.NetworkMode);
+	const cpus = host.NanoCpus > 0 ? host.NanoCpus / 1e9 : host.CpuQuota > 0 && host.CpuPeriod > 0 ? host.CpuQuota / host.CpuPeriod : 0;
+	return {
+		hostname: body?.Hostname || '',
+		memory: host.Memory > 0 ? String(Math.round(host.Memory / 1048576)) : '',
+		cpus: cpus ? decimal(cpus) : '',
+		devices: (host.Devices || []).map(deviceText),
+		ip: isCustomNetwork(network) ? body?.NetworkingConfig?.EndpointsConfig?.[network]?.IPAMConfig?.IPv4Address || '' : '',
+	};
+}
+
 /**
  * 纯函数：容器 inspect + 重建参数 → 编辑表单（与新建表单同形）。
  * 端口只取写明了设备端口的映射；目录只取设备目录（卷挂载不由表单管理，原样保留）。
@@ -119,6 +134,7 @@ export function formFromInspect(c, base) {
 		ports, mounts, env: [...(body.Env || [])],
 		restart: host.RestartPolicy?.Name || 'no', network: formNetwork(host.NetworkMode),
 		command: body.Cmd ? joinCommand(body.Cmd) : '', privileged: !!host.Privileged, start: true,
+		...limitsOf(body),
 	};
 }
 
@@ -126,9 +142,11 @@ const filled = row => String(row.host ?? '').trim() !== '' || String(row.contain
 
 /**
  * 纯函数：重建参数 + 编辑后的表单（已校验）→ 新的 create 参数。
- * 表单负责：镜像、环境变量、命令、重启策略、特权、网络、写明设备端口的映射、设备目录挂载；其余字段保持 base 原样。
+ * 表单负责：镜像、环境变量、命令、重启策略、特权、网络、写明设备端口的映射、设备目录挂载；
+ * 主机名、资源限制、设备与固定地址只在改动时写入（原写法如非整 MB 的内存、CpuQuota 不被改掉）；其余字段保持 base 原样。
  */
 export function buildEdit(base, form) {
+	const was = limitsOf(base.body);
 	const body = clone(base.body);
 	const host = body.HostConfig ||= {};
 	body.Image = createImage(form);
@@ -148,6 +166,24 @@ export function buildEdit(base, form) {
 			delete body.Hostname; delete body.Domainname;
 		} else body.NetworkingConfig = { EndpointsConfig: { ...endpoints, [form.network]: {} } };
 	}
+	const ip = isCustomNetwork(form.network) ? String(form.ip || '').trim() : '';
+	if (form.network !== before || ip !== was.ip) {
+		const ep = body.NetworkingConfig?.EndpointsConfig?.[form.network];
+		if (ep) {
+			const ipam = { ...(ep.IPAMConfig || {}) };
+			if (ip) ipam.IPv4Address = ip; else delete ipam.IPv4Address;
+			if (Object.keys(ipam).length) ep.IPAMConfig = ipam; else delete ep.IPAMConfig;
+		}
+	}
+
+	/* 主机名与资源限制：只写改动过的；改内存时交还 Docker 决定交换区上限，避免与旧值冲突 */
+	const hostname = ownNetwork(form.network) ? String(form.hostname || '').trim() : '';
+	if (hostname !== was.hostname) { if (hostname) body.Hostname = hostname; else delete body.Hostname; }
+	const memory = String(form.memory ?? '').trim(), cpus = String(form.cpus ?? '').trim();
+	if (memory !== was.memory) { host.Memory = memory ? +memory * 1048576 : 0; host.MemorySwap = 0; }
+	if (cpus !== was.cpus) { host.NanoCpus = cpus ? Math.round(+cpus * 1e9) : 0; host.CpuQuota = 0; host.CpuPeriod = 0; }
+	const devices = (form.devices || []).map(d => String(d).trim()).filter(Boolean);
+	if (JSON.stringify(devices) !== JSON.stringify(was.devices)) host.Devices = devices.map(parseDevice);
 
 	/* 端口：未写设备端口的映射（随机端口）不由表单管理，保留 */
 	const bindings = {}, oldKeys = new Set();

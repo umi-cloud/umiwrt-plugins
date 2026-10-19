@@ -9,7 +9,9 @@
 	const result = $derived(running ? null : taskResult(task));
 	const percent = $derived(task.step === 'pull' && running ? pullPercent(task) : null);
 	const tone = s => ({ done: 'success', failed: 'danger', running: 'info' }[s] || 'neutral');
-	const stateText = s => ({ done: t('Done'), failed: t('Failed'), running: t('In progress'), skipped: t('Skipped'), pending: t('Waiting') }[s] || s);
+	/* 批量更新里跳过的是已是最新的容器 */
+	const stateText = s => task.kind === 'update' && s === 'skipped' ? t('Up to date')
+		: ({ done: t('Done'), failed: t('Failed'), running: t('In progress'), skipped: t('Skipped'), pending: t('Waiting') }[s] || s);
 	let open = $state(false);
 </script>
 

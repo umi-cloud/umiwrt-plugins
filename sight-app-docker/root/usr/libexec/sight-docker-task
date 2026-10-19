@@ -1,7 +1,7 @@
 #!/usr/bin/ucode
 'use strict';
 /*
- * 由 sight.docker 的 pull_start / recreate_start / compose_start 在后台启动，执行 /tmp/sight-docker/task.json 里
+ * 由 sight.docker 的 pull_start / recreate_start / update_start / check_start / compose_start 在后台启动，执行 /tmp/sight-docker/task.json 里
  * 已校验的任务，把步骤、进度与错误写回同一文件；标准输出即任务日志（task.log），页面经 task_status 轮询。
  * 不接受命令行参数；外部命令一律以参数数组执行，不经过 shell。
  *   pull      下载镜像（POST /images/create 的逐行进度汇总）
@@ -9,6 +9,8 @@
  *             任一步失败删掉新容器、改回名字并恢复旧容器原来的运行状态。mode=update 时先拉取原镜像引用，
  *             没有新版则不重建
  *   compose   docker-compose up / pull / down / remove
+ *   update    批量更新：对每个容器做 mode=update 的 recreate，失败的恢复原容器后继续下一个
+ *   check     检查更新：逐个查询镜像标签在仓库里的摘要（不下载），写入 updates.json
  */
 import { readfile, writefile, rename, access, unlink, rmdir, lsdir, stdout } from 'fs';
 import * as api from 'sight.docker_api';
@@ -20,6 +22,9 @@ const COMPOSE = '/usr/bin/docker-compose';
 /* 新容器启动后观察这么久仍在运行才算成功（秒） */
 const SETTLE = 3;
 const BACKUP_SUFFIX = '-sight-old';
+const UPDATES = DIR + '/updates.json';
+/* 查询一个镜像的仓库摘要最多等这么久（毫秒） */
+const CHECK_TIMEOUT = 30000;
 
 const task = (() => { try { return json(readfile(TASK) || ''); } catch { return null; } })();
 if (!task || task.state != 'running' || !task.kind) exit(1);
@@ -111,49 +116,50 @@ function inspect(id) {
 	return r.code == 200 ? r.body : null;
 }
 
-function run_recreate() {
-	const old = inspect(task.id);
-	if (!old) finish('failed', 'The container no longer exists');
-	const name = ltrim(old.Name, '/'), new_name = task.new_name || name;
+/* 用新配置重建一个容器（item：{ id, mode, new_name, body }），stage(步骤, 状态) 报告进度。
+   成功返回 { result: 'recreated' | 'latest', warning? }；失败返回 { error, error_args?, rollback?, rollback_error? }，
+   重建过程中失败时已删掉新容器、改回名字并恢复旧容器原来的运行状态 */
+function recreate(item, stage) {
+	const old = inspect(item.id);
+	if (!old) return { error: 'The container no longer exists' };
+	const name = ltrim(old.Name, '/'), new_name = item.new_name || name;
 	const was_running = !!old.State?.Running;
-	const body = task.body;
-	task.name = name;
-	task.was_running = was_running;
+	const body = item.body;
+	item.name = name;
+	item.was_running = was_running;
 	save(true);
 
-	if (task.mode == 'update') {
-		step('pull', 'running');
+	if (item.mode == 'update') {
+		stage('pull', 'running');
 		const ref = old.Config?.Image;
 		const error = pull(ref);
-		if (error) finish('failed', error);
+		if (error) return { error: error };
 		const img = api.request('GET', `/images/${ref}/json`);
-		if (img.code != 200) finish('failed', api.reason(img));
-		step('pull', 'done');
+		if (img.code != 200) return { error: api.reason(img) };
+		stage('pull', 'done');
 		if (img.body.Id == old.Image) {
-			task.result = 'latest';
-			for (let s in task.steps) if (s.state == 'pending') s.state = 'skipped';
 			log(`${ref} is already the latest version`);
-			finish('done');
+			return { result: 'latest' };
 		}
 		body.Image = ref;
 	}
 	else if (api.request('GET', `/images/${body.Image}/json`).code == 404) {
-		step('pull', 'running');
+		stage('pull', 'running');
 		const error = pull(body.Image);
-		if (error) finish('failed', error);
-		step('pull', 'done');
+		if (error) return { error: error };
+		stage('pull', 'done');
 	}
-	else step('pull', 'skipped');
+	else stage('pull', 'skipped');
 
 	const backup = name + BACKUP_SUFFIX;
-	if (inspect(backup)) finish('failed', 'A container named %s is left over from an earlier attempt. Delete it and try again.', [backup]);
-	if (new_name != name && inspect(new_name)) finish('failed', 'A container with this name already exists');
+	if (inspect(backup)) return { error: 'A container named %s is left over from an earlier attempt. Delete it and try again.', error_args: [backup] };
+	if (new_name != name && inspect(new_name)) return { error: 'A container with this name already exists' };
 
 	let renamed = false, created = null;
 	/* 失败：删掉新容器（不带 v，匿名卷仍属于旧容器）、改回名字、恢复原运行状态 */
 	function rollback(error, args) {
 		log('Rolling back: ' + (args ? sprintf(error, ...args) : error));
-		task.rollback = 'running';
+		item.rollback = 'running';
 		save(true);
 		const problems = [];
 		if (created) {
@@ -168,28 +174,29 @@ function run_recreate() {
 			const r = api.request('POST', `/containers/${old.Id}/start`);
 			if (r.code >= 300 && r.code != 304) push(problems, api.reason(r));
 		}
-		task.rollback = length(problems) ? 'failed' : 'done';
-		if (length(problems)) task.rollback_error = join('; ', problems);
-		log(task.rollback == 'done' ? `Restored ${name}` : 'Rollback incomplete: ' + task.rollback_error);
-		finish('failed', error, args);
+		const out = { error: error, rollback: length(problems) ? 'failed' : 'done' };
+		if (args) out.error_args = args;
+		if (length(problems)) out.rollback_error = join('; ', problems);
+		log(out.rollback == 'done' ? `Restored ${name}` : 'Rollback incomplete: ' + out.rollback_error);
+		return out;
 	}
 
-	step('stop', 'running');
+	stage('stop', 'running');
 	if (was_running) {
 		log(`Stopping ${name}`);
 		const r = api.request('POST', `/containers/${old.Id}/stop`, { query: { t: 10 } });
-		if (r.code >= 300 && r.code != 304) finish('failed', api.reason(r));
+		if (r.code >= 300 && r.code != 304) return { error: api.reason(r) };
 	}
 	const r1 = api.request('POST', `/containers/${old.Id}/rename`, { query: { name: backup } });
 	if (r1.code >= 300) {
 		if (was_running) api.request('POST', `/containers/${old.Id}/start`);
-		finish('failed', api.reason(r1));
+		return { error: api.reason(r1) };
 	}
 	renamed = true;
-	step('stop', 'done');
+	stage('stop', 'done');
 
 	/* 新建时只带主网络（旧版 API 不接受多个），其余网络建好后再连接 */
-	step('create', 'running');
+	stage('create', 'running');
 	log(`Creating ${new_name}`);
 	const endpoints = body.NetworkingConfig?.EndpointsConfig || {};
 	const primary = body.HostConfig?.NetworkMode || 'bridge';
@@ -200,37 +207,105 @@ function run_recreate() {
 	}
 	body.NetworkingConfig = { EndpointsConfig: first };
 	const c = api.request('POST', '/containers/create', { query: { name: new_name }, body: body });
-	if (c.code >= 300 || !c.body?.Id) rollback(api.reason(c));
+	if (c.code >= 300 || !c.body?.Id) return rollback(api.reason(c));
 	created = c.body.Id;
-	task.new_id = created;
+	item.new_id = created;
 	for (let net, cfg in extra) {
 		const r = api.request('POST', `/networks/${net}/connect`, { body: { Container: created, EndpointConfig: cfg || {} } });
-		if (r.code >= 300) rollback(api.reason(r));
+		if (r.code >= 300) return rollback(api.reason(r));
 	}
-	step('create', 'done');
+	stage('create', 'done');
 
 	if (was_running) {
-		step('start', 'running');
+		stage('start', 'running');
 		log(`Starting ${new_name}`);
 		const r = api.request('POST', `/containers/${created}/start`);
-		if (r.code >= 300 && r.code != 304) rollback(api.reason(r));
+		if (r.code >= 300 && r.code != 304) return rollback(api.reason(r));
 		sleep(SETTLE);
 		const now = inspect(created);
 		if (!now?.State?.Running)
-			rollback('The new container stopped right after starting (exit code %d)', [now?.State?.ExitCode ?? -1]);
-		step('start', 'done');
+			return rollback('The new container stopped right after starting (exit code %d)', [now?.State?.ExitCode ?? -1]);
+		stage('start', 'done');
 	}
-	else step('start', 'skipped');
+	else stage('start', 'skipped');
 
 	/* 旧容器不带 v 删除：匿名卷已接到新容器上 */
-	step('cleanup', 'running');
+	stage('cleanup', 'running');
+	const out = { result: 'recreated' };
 	const d = api.request('DELETE', `/containers/${old.Id}`, { query: { force: true } });
 	if (d.code >= 300 && d.code != 404) {
-		task.warning = api.reason(d);
-		log(`The previous container ${backup} could not be deleted: ${task.warning}`);
+		out.warning = api.reason(d);
+		log(`The previous container ${backup} could not be deleted: ${out.warning}`);
 	}
-	step('cleanup', 'done');
-	task.result = 'recreated';
+	stage('cleanup', 'done');
+	return out;
+}
+
+/* 结果里除错误外的字段（result、warning、rollback…）写回 */
+function merge_result(item, r) {
+	for (let k, v in r) if (k != 'error' && k != 'error_args') item[k] = v;
+}
+
+function run_recreate() {
+	const r = recreate(task, step);
+	merge_result(task, r);
+	if (r.error) finish('failed', r.error, r.error_args);
+	if (r.result == 'latest') for (let s in task.steps) if (s.state == 'pending') s.state = 'skipped';
+	finish('done');
+}
+
+/* 批量更新：每个容器一个步骤；已是最新的记为 skipped，失败的记下原因后继续 */
+function run_update() {
+	let failed = 0, updated = 0;
+	for (let item in task.items) {
+		item.mode = 'update';
+		step(item.name, 'running');
+		log(`== ${item.name}`);
+		const r = recreate(item, () => save(false));
+		merge_result(item, r);
+		if (r.error) {
+			failed++;
+			item.error = r.error;
+			if (r.error_args) item.error_args = r.error_args;
+			log('Error: ' + (r.error_args ? sprintf(r.error, ...r.error_args) : r.error));
+		}
+		else if (r.result == 'recreated') updated++;
+		step(item.name, r.error ? 'failed' : r.result == 'latest' ? 'skipped' : 'done');
+	}
+	task.updated = updated;
+	task.failed = failed;
+	if (failed) finish('failed', '%d of %d containers could not be updated', [failed, length(task.items)]);
+	finish('done');
+}
+
+/* ---- 检查更新 ---- */
+
+/* 逐个查询仓库里标签对应的摘要，每查完一个就写回结果；全部失败才算任务失败 */
+function run_check() {
+	let results = null;
+	try { results = json(readfile(UPDATES) || '{}'); } catch { }
+	if (type(results) != 'object') results = {};
+	let failed = 0, error = null;
+	for (let ref in task.images) {
+		step(ref, 'running');
+		log(`Checking ${ref}`);
+		const r = api.request('GET', `/distribution/${ref}/json`, { timeout: CHECK_TIMEOUT });
+		const digest = r.code == 200 ? r.body?.Descriptor?.digest : null;
+		if (digest) {
+			results[ref] = { digest: digest, checked: time() };
+			log(`${ref}: ${digest}`);
+		} else {
+			failed++;
+			error = api.reason(r);
+			results[ref] = { error: error, checked: time() };
+			log(`${ref}: ${error}`);
+		}
+		writefile(UPDATES + '.tmp', sprintf('%J', results));
+		rename(UPDATES + '.tmp', UPDATES);
+		step(ref, digest ? 'done' : 'failed');
+	}
+	task.failed = failed;
+	if (failed == length(task.images)) finish('failed', error);
 	finish('done');
 }
 
@@ -272,4 +347,6 @@ function run_compose() {
 if (task.kind == 'pull') run_pull();
 else if (task.kind == 'recreate') run_recreate();
 else if (task.kind == 'compose') run_compose();
+else if (task.kind == 'update') run_update();
+else if (task.kind == 'check') run_check();
 finish('failed', 'Unknown task');

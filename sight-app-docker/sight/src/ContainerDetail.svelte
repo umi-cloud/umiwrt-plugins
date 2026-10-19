@@ -1,14 +1,15 @@
 <script>
 	import { onDestroy } from 'svelte';
-	import { t, errorText, createPoller, useEditor, fmtBytes, Badge, Button, Icon, Select, SettingRow, FormSection, DescriptionList, Feedback, LogView } from '@sight/sdk';
+	import { t, errorText, createPoller, useEditor, fmtBytes, Badge, Button, Icon, Select, SettingRow, FormSection, DescriptionList, Feedback } from '@sight/sdk';
 	import { cpuPercent, memoryUsage, canUpdate, portLinks, RESTART_POLICIES } from './service.js';
 	import { stateTone, stateLabel, policyLabel, short, date } from './format.js';
 	import Terminal from './Terminal.svelte';
+	import ContainerLogs from './ContainerLogs.svelte';
 
 	/* 容器详情（抽屉正文）：状态与操作（打开网页、编辑、更新）、资源占用、终端、重启策略、挂载与日志。
 	   启停、删除与更新需确认，交给页面（onrequest）；页面操作后重建本组件以重读全部内容。
 	   Compose 项目里的容器以项目文件为准，不在这里编辑或更新。 */
-	let { svc, container, memTotal = null, locked = false, onrequest, onstart, onedit } = $props();
+	let { svc, container, memTotal = null, locked = false, updateAvailable = false, onrequest, onstart, onedit } = $props();
 	const links = $derived(portLinks(container.publish, window.location.hostname));
 	let config = $state(undefined);   // undefined 加载中；null 读取失败
 	let configError = $state('');
@@ -17,9 +18,8 @@
 	let saving = $state(false);
 	let usage = $state(null);         // { cpu, memory }
 	let usageError = $state('');
-	let logs = $state(undefined);     // undefined 加载中；{ ok, text }
-	let alive = true, logVersion = 0, prev = null;
-	onDestroy(() => { alive = false; logVersion++; });
+	let alive = true, prev = null;
+	onDestroy(() => { alive = false; });
 	useEditor(() => ({ dirty: !!config && policy !== config.restart, busy: saving }));
 
 	const running = $derived(container.state === 'running');
@@ -28,12 +28,6 @@
 	async function loadConfig() {
 		try { const r = await svc.inspect(container.id); if (alive) { config = r; policy = r.restart; } }
 		catch (e) { if (alive) { config = null; configError = errorText(e); } }
-	}
-	async function loadLogs() {
-		const request = ++logVersion;
-		logs = undefined;
-		try { const r = await svc.logs(container.id); if (alive && request === logVersion) logs = r; }
-		catch (e) { if (alive && request === logVersion) logs = { ok: false, text: errorText(e) }; }
 	}
 	/* 资源占用：每 2 秒一次即时采样，CPU 由相邻两次采样相减；首拍只有内存 */
 	async function sample() {
@@ -47,7 +41,6 @@
 	const poller = createPoller(sample, 2000);
 	$effect(() => { if (running) { poller.start(); return () => poller.stop(); } });
 	loadConfig();
-	loadLogs();
 
 	async function savePolicy() {
 		if (busyAll || !config) return;
@@ -80,7 +73,7 @@
 
 <div class="detail" data-container-detail={container.name}>
 	<div class="detail-head">
-		<Badge tone={stateTone(container.state)}>{stateLabel(container.state)}</Badge>
+		<span class="badges"><Badge tone={stateTone(container.state)}>{stateLabel(container.state)}</Badge>{#if updateAvailable}<Badge tone="info">{t('Update available')}</Badge>{/if}</span>
 		<span class="detail-actions">
 			{#if running}
 				<Button disabled={busyAll} onclick={() => onrequest('restart')}>{t('Restart')}</Button>
@@ -90,7 +83,7 @@
 			{/if}
 			{#if !container.project}
 				<Button disabled={busyAll} onclick={onedit} data-action="edit">{t('Edit')}</Button>
-				<Button disabled={busyAll || !canUpdate(config?.imageRef)} title={config && !canUpdate(config.imageRef) ? t('Created from an image ID') : undefined} onclick={() => onrequest('update')} data-action="update">{t('Update')}</Button>
+				<Button variant={updateAvailable ? 'primary' : undefined} disabled={busyAll || !canUpdate(config?.imageRef)} title={config && !canUpdate(config.imageRef) ? t('Created from an image ID') : undefined} onclick={() => onrequest('update')} data-action="update">{t('Update')}</Button>
 			{/if}
 			<Button variant="danger" disabled={busyAll} onclick={() => onrequest('remove')}>{t('Delete')}</Button>
 		</span>
@@ -145,19 +138,15 @@
 		</FormSection>
 	{/if}
 
-	<FormSection title={t('Logs')} description={t('Last 200 lines, oldest first.')}>
-		{#if logs === undefined}<Feedback tone="loading" message={t('Loading…')} compact />
-		{:else if !logs.ok}<Feedback tone="error" message={t('Logs could not be read: %s', logs.text || t('unknown error'))} compact />
-		{:else if !logs.text}<Feedback tone="empty" message={t('No log output')} compact />
-		{:else}<LogView text={logs.text} label={t('Log contents')} tail maxHeight="50vh" />{/if}
-		<div><Button size="compact" onclick={loadLogs} disabled={logs === undefined}>{t('Refresh logs')}</Button></div>
+	<FormSection title={t('Logs')}>
+		<ContainerLogs {svc} {container} />
 	</FormSection>
 </div>
 
 <style lang="less">
 	.detail { display: flex; flex-direction: column; gap: var(--sp-6); }
 	.detail-head { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); flex-wrap: wrap; }
-	.detail-actions { display: flex; gap: var(--sp-2); flex-wrap: wrap; }
+	.detail-actions, .badges { display: flex; gap: var(--sp-2); flex-wrap: wrap; }
 	.mounts { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: var(--sp-2); font-size: var(--fs-sm); overflow-wrap: anywhere; }
 	.links { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
 	.muted { margin: 0; color: var(--text-muted); font-size: var(--fs-sm); }

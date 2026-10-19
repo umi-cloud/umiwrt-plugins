@@ -1,30 +1,39 @@
 <script>
 	import { onDestroy, tick } from 'svelte';
-	import { t, errorText, client, uci, activity, useEditor, requestLeave, fmtBytes, Card, Tabs, Table, Toolbar, Badge, Button, Checkbox, Icon, StatusHero, Drawer, Dialog, Feedback, Field, Input, ErrorSummary, FormActions } from '@sight/sdk';
-	import { createDocker, isImageRef, normalizeImage, portLinks, groupContainers } from './service.js';
+	import { t, errorText, client, uci, activity, useEditor, requestLeave, createPoller, route, navigate, fmtBytes, Card, Tabs, Table, Toolbar, Badge, Button, Checkbox, Icon, StatusHero, Drawer, Dialog, Feedback, Field, Input, ErrorSummary, FormActions } from '@sight/sdk';
+	import { createDocker, isImageRef, normalizeImage, portLinks, groupContainers, cpuPercent, memoryUsage, updateState, checkRefs, lastChecked, statesChanged, matchContainer } from './service.js';
 	import { stateTone, stateLabel, short, date } from './format.js';
 	import ContainerDetail from './ContainerDetail.svelte';
 	import CreateContainer from './CreateContainer.svelte';
 	import Compose from './Compose.svelte';
 	import Resources from './Resources.svelte';
 	import Settings from './Settings.svelte';
+	import Storage from './Storage.svelte';
 	import TaskProgress from './TaskProgress.svelte';
 
-	/* 按日常任务：看哪些容器在跑、启停重启、打开网页、看日志与资源占用、进终端；新建、编辑、更新、删除容器；
-	   Compose 项目；下载与清理镜像；网络与卷；镜像加速与数据目录在「设置」。
-	   下载镜像、更新/编辑（重建）容器与 Compose 操作是设备端后台任务，同一时间一个，进度显示在状态卡下方。 */
+	/* 按日常任务：看哪些容器在跑、各占多少 CPU 与内存、启停重启、打开网页、看日志、进终端；新建、编辑、删除容器；
+	   检查哪些容器有新版镜像并逐个或全部更新；Compose 项目；下载与清理镜像；网络与卷；存储空间与清理；镜像加速与数据目录在「设置」。
+	   下载镜像、检查更新、更新/编辑（重建）容器与 Compose 操作是设备端后台任务，同一时间一个，进度显示在状态卡下方。 */
 	const svc = createDocker(client, uci);
 	let data = $state(undefined);   // undefined 加载中；null 未安装
 	let error = $state('');
 	let notice = $state(null);
 	let busy = $state('');          // 正在操作的容器/镜像 ID，或 'service' / 'prune'
-	let section = $state('containers');
+	/* 分区与地址 ?tab= 同步：刷新与后退时停在原分区 */
+	const SECTIONS = ['containers', 'compose', 'images', 'resources', 'storage', 'settings'];
+	const routeSection = () => SECTIONS.includes(route.params.tab) ? route.params.tab : 'containers';
+	let section = $state(routeSection());
+	$effect(() => { section = routeSection(); });
+	/* 有未保存的改动时离开被拒，分区退回地址里的 */
+	async function changeSection(next) { if (!await navigate(next === 'containers' ? '/docker' : `/docker?tab=${next}`)) section = routeSection(); }
+	let query = $state('');
 	const tabsId = $props.id();
 	let detailId = $state(null);
 	let detailVersion = $state(0);  // 操作后递增，重建详情以重读
-	let confirm = $state(null);     // { kind: 'stop' | 'restart' | 'remove' | 'image' | 'prune', item }
+	let confirm = $state(null);     // { kind: 'stop' | 'restart' | 'remove' | 'image' | 'prune' | 'update' | 'updateAll', item }
 	let removeVolumes = $state(false);
 	let creating = $state(false);
+	let createFrom = $state('');    // 从镜像列表「新建容器」时预选的镜像
 	let editing = $state(null);     // { id, name, base, form }；'loading' 读取中
 	let pullOpen = $state(false);
 	let pullRef = $state('');
@@ -33,6 +42,8 @@
 	let task = $state(null);        // 设备端当前或最近一次后台任务
 	let output = $state('');
 	let taskShown = $state(false);  // 本页发起或进入时正在进行的任务，结束后保留到关闭
+	let usage = $state({});         // 容器 ID → { cpu, memory }，只有运行中的
+	let timezone = $state('');
 	const taskRunning = $derived(task?.state === 'running');
 	/* 后台任务进行中不做其它容器操作，避免与重建、Compose 冲突 */
 	const locked = $derived(!!busy || activity.busy || taskRunning);
@@ -93,12 +104,40 @@
 		{ value: 'compose', label: t('Compose'), count: data?.compose?.projects?.length ?? 0 },
 		{ value: 'images', label: t('Images'), count: data?.images?.length ?? 0 },
 		{ value: 'resources', label: t('Networks and volumes') },
+		{ value: 'storage', label: t('Storage') },
 		{ value: 'settings', label: t('Settings') },
 	]);
 	const unused = $derived(data?.images?.filter(i => !i.containers).length ?? 0);
-	const groups = $derived(groupContainers(data?.containers || []));
-	const userNetworks = $derived(Array.isArray(data?.networks) ? data.networks.filter(n => !n.builtin).map(n => n.name) : []);
+	const allGroups = $derived(groupContainers(data?.containers || []));
+	/* 列表按搜索过滤；「全部更新」不受过滤影响 */
+	const groups = $derived(query.trim() ? groupContainers((data?.containers || []).filter(c => matchContainer(c, query))) : allGroups);
+	const userNetworks = $derived(Array.isArray(data?.networks) ? data.networks.filter(n => !n.builtin).map(n => ({ name: n.name, subnets: n.subnets })) : []);
 	const hostname = window.location.hostname;
+	svc.timezone().then(z => { if (alive) timezone = z; });
+
+	/* 有新版镜像的容器：Compose 项目里的按项目更新，不进「全部更新」 */
+	const updates = $derived(Object.fromEntries((data?.containers || []).map(c => [c.id, updateState(c, data.images, data.checks)])));
+	const outdated = $derived(allGroups.standalone.filter(c => updates[c.id] === 'available'));
+	const refs = $derived(checkRefs(data?.containers));
+	const checked = $derived(lastChecked(data?.containers, data?.checks));
+
+	/* 资源占用：停在容器页时每 5 秒一次采样（一次取全部），CPU 由相邻两次相减；
+	   容器增减或启停（包括在别处操作）时回读列表 */
+	let samples = {};
+	async function sampleUsage() {
+		if (document.hidden || !data?.reachable) return;
+		let r;
+		try { r = await svc.usage(); } catch { return; }
+		if (!alive) return;
+		const next = {};
+		for (const [id, s] of Object.entries(r.samples || {})) next[id] = { cpu: samples[id] ? cpuPercent(samples[id], s) : null, memory: memoryUsage(s) };
+		samples = r.samples || {};
+		usage = next;
+		if (!locked && data?.reachable && statesChanged(r.states, data.containers)) load();
+	}
+	const usagePoller = createPoller(sampleUsage, 5000);
+	const watchUsage = $derived(!!data?.reachable && section === 'containers');
+	$effect(() => { if (watchUsage) { usagePoller.start(); return () => usagePoller.stop(); } });
 
 	/* 即时操作：执行后回读列表并重建详情 */
 	async function run(key, action, success) {
@@ -137,26 +176,40 @@
 		try { await runTask(() => svc.update(c.id)); }
 		catch (e) { if (alive) notice = { tone: 'error', text: errorText(e) }; }
 	}
+	async function updateAll(list) {
+		confirm = null;
+		try { await runTask(() => svc.updateAll(list.map(c => c.id))); }
+		catch (e) { if (alive) notice = { tone: 'error', text: errorText(e) }; }
+	}
+	/* 检查更新：设备端向仓库查询各镜像标签的摘要（不下载），结束后回读列表即显示哪些有新版 */
+	async function checkUpdates() {
+		if (locked) return;
+		try { await runTask(() => svc.checkStart(refs)); }
+		catch (e) { if (alive) notice = { tone: 'error', text: errorText(e) }; }
+	}
 	function onconfirm() {
 		const { kind, item } = confirm;
 		if (kind === 'image') removeImage(item);
 		else if (kind === 'remove') removeContainer(item);
 		else if (kind === 'prune') prune();
 		else if (kind === 'update') update(item);
+		else if (kind === 'updateAll') updateAll(item);
 		else act(item, kind);
 	}
 	function request(kind, item) { removeVolumes = false; confirm = { kind, item }; }
 
 	async function openDetail(c) { if (!await requestLeave() || !alive) return; detailId = c.id; }
 	async function closeDetail() { if (!await requestLeave() || !alive) return; detailId = null; }
-	async function openCreate() { if (locked || !await requestLeave() || !alive) return; notice = null; creating = true; }
+	async function openCreate(image = '') { if (locked || !await requestLeave() || !alive) return; notice = null; createFrom = image; creating = true; }
 	async function closeCreate() { if (!await requestLeave() || !alive) return; creating = false; }
 	async function created({ name, image, started, startError }) {
 		creating = false;
 		const label = name || image;
-		notice = startError ? { tone: 'error', text: t('Created %s, but it could not be started: %s', label, startError) }
+		/* 内核或环境不支持内存/CPU 限制时 runc 报 cgroup 文件缺失，补一句怎么办 */
+		const hint = startError && /cgroup|memory\.max|cpu\.max/.test(startError) ? ' ' + t('This device may not support memory or CPU limits. Edit the container and clear the limits.') : '';
+		notice = startError ? { tone: 'error', text: t('Created %s, but it could not be started: %s', label, startError) + hint }
 			: { tone: 'success', text: started ? t('Created and started %s', label) : t('Created %s', label) };
-		section = 'containers';
+		await changeSection('containers');
 		await load();
 	}
 
@@ -191,19 +244,27 @@
 	}
 
 	const containerAttrs = c => ({ 'data-container': c.name, 'data-clickable': '', onclick: e => { if (!e.target.closest('button, a, input')) openDetail(c); } });
-	const containerCells = c => [{ text: c.name }, { text: '' }, { text: c.ports.join(', ') || '-', mono: !!c.ports.length }, { text: c.status }];
+	const usageText = c => {
+		const u = usage[c.id];
+		if (c.state !== 'running') return '-';
+		if (!u) return '…';
+		return [u.cpu == null ? '…' : `${u.cpu.toFixed(1)}%`, u.memory ? fmtBytes(u.memory.used) : ''].filter(Boolean).join(' · ');
+	};
+	const containerCells = c => [{ text: c.name }, { text: '' }, { text: usageText(c), nowrap: true }, { text: c.ports.join(', ') || '-', mono: !!c.ports.length }, { text: c.status }];
+	const containerHeaders = $derived([t('Container'), t('State'), t('CPU · memory'), t('Ports'), t('Status')]);
 	const linkOf = c => portLinks(c.publish, hostname)[0];
 	const imageCells = i => [{ text: i.tags.join(', ') || t('(untagged)'), strong: true }, { text: short(i.id), mono: true }, { text: fmtBytes(i.size) }, { text: date(i.created) }, { text: i.containers ? t('%d containers', i.containers) : t('Unused') }];
 	const TITLES = {
 		image: c => t('Remove image %s?', c.item.tags[0] || short(c.item.id)), stop: c => t('Stop %s?', c.item.name), restart: c => t('Restart %s?', c.item.name),
 		remove: c => t('Delete %s?', c.item.name), prune: () => t('Remove %d unused images?', unused), update: c => t('Update %s?', c.item.name),
+		updateAll: c => t('Update %d containers?', c.item.length),
 	};
-	const LABELS = { image: 'Remove', stop: 'Stop', restart: 'Restart', remove: 'Delete', prune: 'Remove', update: 'Update' };
+	const LABELS = { image: 'Remove', stop: 'Stop', restart: 'Restart', remove: 'Delete', prune: 'Remove', update: 'Update', updateAll: 'Update' };
 </script>
 
 {#snippet containerContent(raw, row, colIndex)}
 	{#if colIndex === 1}<Badge tone={stateTone(row.state)}>{stateLabel(row.state)}</Badge>
-	{:else if colIndex === 0}<span class="name"><strong>{row.name}</strong><span class="muted mono">{row.image}</span></span>
+	{:else if colIndex === 0}<span class="name"><strong>{row.name}{#if updates[row.id] === 'available'} <Badge tone="info" data-update-available>{t('Update available')}</Badge>{/if}</strong><span class="muted mono">{row.ref || row.image}</span></span>
 	{:else}{raw.text}{/if}
 {/snippet}
 
@@ -219,16 +280,22 @@
 {/snippet}
 
 {#snippet imageActions(row)}
+	{#if row.tags.length}<Button size="compact" disabled={locked} onclick={() => openCreate(row.tags[0])} data-action="create-from">{t('New container')}</Button>{/if}
 	<Button size="compact" disabled={locked || row.containers > 0} title={row.containers ? t('Used by containers') : undefined} onclick={() => request('image', row)}>{t('Remove')}</Button>
 {/snippet}
 
-<Dialog open={!!confirm} tone={confirm?.kind === 'restart' || confirm?.kind === 'update' ? 'primary' : 'danger'} busy={locked}
+<Dialog open={!!confirm} tone={confirm?.kind === 'restart' || confirm?.kind === 'update' || confirm?.kind === 'updateAll' ? 'primary' : 'danger'} busy={locked}
 	title={confirm ? TITLES[confirm.kind](confirm) : ''} confirmLabel={confirm ? t(LABELS[confirm.kind]) : ''} cancelLabel={t('Cancel')}
 	{onconfirm} onclose={() => { if (!busy) confirm = null; }}>
 	{#if confirm?.kind === 'image'}{t('The image is deleted from the device. It can be downloaded again later.')}
 	{:else if confirm?.kind === 'stop'}{t('Services provided by this container become unavailable until it is started again.')}
 	{:else if confirm?.kind === 'restart'}{t('The container stops briefly and starts again.')}
 	{:else if confirm?.kind === 'prune'}{t('Images that no container uses are deleted from the device. Images used by any container, running or stopped, are kept.')}
+	{:else if confirm?.kind === 'updateAll'}
+		<div class="confirm-body" data-update-all-dialog>
+			<p>{t('The device downloads the newest image for each container below. Containers with a newer version are recreated with the same settings and stop briefly; volumes and folders are kept. If one fails, it is restored and the others continue.')}</p>
+			<ul>{#each confirm.item as c}<li><span class="mono">{c.name}</span> <span class="muted">{c.ref}</span></li>{/each}</ul>
+		</div>
 	{:else if confirm?.kind === 'update'}<span data-update-dialog>{t('The device downloads the newest %s. If there is a newer version, the container is recreated with the same settings and stops briefly; volumes and folders are kept. If anything fails, the current container is restored.', confirm.item.image)}</span>
 	{:else if confirm?.kind === 'remove'}
 		<div class="confirm-body" data-remove-dialog>
@@ -260,22 +327,27 @@
 		</Card>
 		{#if task && taskShown}<Card name="docker-task"><div data-docker-task><TaskProgress {task} {output} ondismiss={() => taskShown = false} /></div></Card>{/if}
 
-		<div class="workspace-tabs"><Tabs id={tabsId} label={t('Docker')} items={tabs} bind:value={section} variant="underline" /></div>
+		<div class="workspace-tabs"><Tabs id={tabsId} label={t('Docker')} items={tabs} bind:value={section} variant="underline" onchange={changeSection} /></div>
 		<div id={`${tabsId}-panel-0`} role="tabpanel" aria-labelledby={`${tabsId}-tab-0`} hidden={section !== 'containers'} tabindex="0">
 			<div class="stack">
 				<Card icon="container" flush>
-					<Toolbar label={t('Containers')} count={t('%d running', data.info.running)} live={false}>
-						{#snippet actions()}<Button variant="primary" size="compact" disabled={locked} onclick={openCreate} data-action="create">{t('New container')}</Button>{/snippet}
+					<Toolbar label={t('Containers')} count={[t('%d running', data.info.running), checked ? t('Checked for updates %s', date(checked)) : ''].filter(Boolean).join(' · ')} live={false}>
+						{#snippet search()}<Input type="search" size="compact" placeholder={t('Search by name, image or port')} bind:value={query} aria-label={t('Search containers')} data-container-search />{/snippet}
+						{#snippet actions()}
+							<Button size="compact" disabled={locked || !refs.length} onclick={checkUpdates} data-action="check-updates">{task?.kind === 'check' && taskRunning ? t('Checking…') : t('Check for updates')}</Button>
+							{#if outdated.length}<Button size="compact" disabled={locked} onclick={() => request('updateAll', outdated)} data-action="update-all">{t('Update all (%d)', outdated.length)}</Button>{/if}
+							<Button variant="primary" size="compact" disabled={locked} onclick={() => openCreate()} data-action="create">{t('New container')}</Button>
+						{/snippet}
 					</Toolbar>
-					<Table headers={[t('Container'), t('State'), t('Ports'), t('Status')]} rows={groups.standalone} cells={containerCells} rowKey={c => c.id} rowAttrs={containerAttrs}
+					<Table headers={containerHeaders} rows={groups.standalone} cells={containerCells} rowKey={c => c.id} rowAttrs={containerAttrs}
 						cellContent={containerContent} actions={containerActions} actionsLabel={t('Actions')}
-						empty={groups.projects.length ? t('All containers belong to Compose projects, listed below.') : t('No containers yet. Create one from an image.')} />
+						empty={query.trim() ? (groups.projects.length ? t('Matching containers are in the Compose projects below.') : t('No containers match the search.')) : groups.projects.length ? t('All containers belong to Compose projects, listed below.') : t('No containers yet. Create one from an image.')} />
 				</Card>
 				{#each groups.projects as g (g.name)}
 					<Card icon="container" title={t('Compose project %s', g.name)} name={`compose-${g.name}`} flush>
-						{#snippet actions()}<Button size="compact" variant="ghost" onclick={() => section = 'compose'}>{t('Manage')}</Button>{/snippet}
+						{#snippet actions()}<Button size="compact" variant="ghost" onclick={() => changeSection('compose')}>{t('Manage')}</Button>{/snippet}
 						<div data-compose-group={g.name}>
-							<Table headers={[t('Container'), t('State'), t('Ports'), t('Status')]} rows={g.containers} cells={containerCells} rowKey={c => c.id} rowAttrs={containerAttrs}
+							<Table headers={containerHeaders} rows={g.containers} cells={containerCells} rowKey={c => c.id} rowAttrs={containerAttrs}
 								cellContent={containerContent} actions={containerActions} actionsLabel={t('Actions')} empty="" />
 						</div>
 					</Card>
@@ -300,28 +372,31 @@
 		<div id={`${tabsId}-panel-3`} role="tabpanel" aria-labelledby={`${tabsId}-tab-3`} hidden={section !== 'resources'} tabindex="0">
 			{#if section === 'resources'}<Resources {svc} networks={data.networks} volumes={data.volumes} {locked} onreload={load} />{/if}
 		</div>
-		<div id={`${tabsId}-panel-4`} role="tabpanel" aria-labelledby={`${tabsId}-tab-4`} hidden={section !== 'settings'} tabindex="0">
+		<div id={`${tabsId}-panel-4`} role="tabpanel" aria-labelledby={`${tabsId}-tab-4`} hidden={section !== 'storage'} tabindex="0">
+			{#if section === 'storage'}<Storage {svc} storage={data.storage} root={data.info.root} {locked} onreload={load} />{/if}
+		</div>
+		<div id={`${tabsId}-panel-5`} role="tabpanel" aria-labelledby={`${tabsId}-tab-5`} hidden={section !== 'settings'} tabindex="0">
 			{#if section === 'settings'}<Settings {svc} root={data.info.root} mirrors={data.info.mirrors} onreload={load} />{/if}
 		</div>
 
 		<Drawer error={notice?.tone === 'error' ? notice.text : ''} open={!!detail} title={detail?.name || ''} onclose={closeDetail}>
 			{#if detail}
 				{#key `${detail.id}:${detailVersion}`}
-					<ContainerDetail {svc} container={detail} memTotal={data.info.memory} {locked} onrequest={kind => request(kind, detail)} onstart={() => act(detail, 'start')} onedit={() => openEdit(detail)} />
+					<ContainerDetail {svc} container={detail} memTotal={data.info.memory} {locked} updateAvailable={updates[detail.id] === 'available'} onrequest={kind => request(kind, detail)} onstart={() => act(detail, 'start')} onedit={() => openEdit(detail)} />
 				{/key}
 			{/if}
 		</Drawer>
 
 		<Drawer open={creating} title={t('New container')} onclose={closeCreate}>
 			{#if creating}
-				<CreateContainer {svc} images={data.images} names={data.containers.map(c => c.name)} networks={userNetworks} pullTask={task?.kind === 'pull' ? task : null} {pull} oncancel={closeCreate} oncreated={created} />
+				<CreateContainer {svc} images={data.images} image={createFrom} names={data.containers.map(c => c.name)} networks={userNetworks} cpus={data.info.cpus} {timezone} pullTask={task?.kind === 'pull' ? task : null} {pull} oncancel={closeCreate} oncreated={created} />
 			{/if}
 		</Drawer>
 
 		<Drawer open={!!editing} title={editing?.name ? t('Edit %s', editing.name) : t('Edit container')} onclose={closeEdit}>
 			{#if editing === 'loading'}<Feedback tone="loading" message={t('Loading…')} />
 			{:else if editing}
-				<CreateContainer {svc} images={data.images} names={data.containers.map(c => c.name)} networks={userNetworks} edit={editing} onedit={saveEdit} oncancel={closeEdit} />
+				<CreateContainer {svc} images={data.images} names={data.containers.map(c => c.name)} networks={userNetworks} cpus={data.info.cpus} {timezone} edit={editing} onedit={saveEdit} oncancel={closeEdit} />
 			{/if}
 		</Drawer>
 
@@ -348,5 +423,6 @@
 	.muted { margin: 0; color: var(--text-muted); font-size: var(--fs-sm); }
 	.mono { font-family: var(--font-family-monospace); font-size: var(--fs-xs); }
 	.confirm-body { display: flex; flex-direction: column; gap: var(--sp-3); }
-	.confirm-body p { margin: 0; }
+	.confirm-body p, .confirm-body ul { margin: 0; }
+	.confirm-body ul { padding-left: var(--sp-5); display: flex; flex-direction: column; gap: var(--sp-1); }
 </style>

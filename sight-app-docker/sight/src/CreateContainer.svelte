@@ -1,33 +1,37 @@
 <script>
 	import { onDestroy, tick } from 'svelte';
 	import { t, errorText, useEditor, Button, Checkbox, Disclosure, DynamicList, ErrorSummary, Field, FormActions, FormSection, Icon, Input, RadioGroup, Select } from '@sight/sdk';
-	import { emptyCreate, validateCreate, createImage, pullPercent, RESTART_POLICIES } from './service.js';
+	import { emptyCreate, validateCreate, createImage, pullPercent, isCustomNetwork, ownNetwork, RESTART_POLICIES } from './service.js';
 	import { policyLabel } from './format.js';
 
-	/* 新建容器（抽屉正文）：选镜像（本机已有，或填写后先下载）→ 名称 → 网络与端口 → 目录 → 环境变量 → 重启策略；
-	   命令与特权模式收进「高级」。镜像不在本机时先经页面的后台拉取任务下载，完成后再创建。
-	   edit（{ form, name }）时为修改已有容器：表单预填，保存交给 onedit 走设备端的重建任务，表单不管理的配置原样保留。 */
-	let { svc, images = [], names = [], networks = [], pullTask = null, pull, oncancel, oncreated, edit = null, onedit } = $props();
+	/* 新建容器（抽屉正文）：选镜像（本机已有，或填写后先下载）→ 名称 → 网络（自定义网络可设固定地址）与端口 → 目录 → 环境变量 → 重启策略；
+	   主机名、内存与 CPU 上限、设备直通、命令与特权模式收进「高级」。镜像不在本机时先经页面的后台拉取任务下载，完成后再创建。
+	   edit（{ form, name }）时为修改已有容器：表单预填，保存交给 onedit 走设备端的重建任务，表单不管理的配置原样保留。
+	   image：预选的本机镜像（从镜像列表新建时）；networks：自定义网络 [{ name, subnets }]；cpus：设备 CPU 核数；timezone：路由器时区（可一键加为 TZ） */
+	let { svc, images = [], image = '', names = [], networks = [], cpus = null, timezone = '', pullTask = null, pull, oncancel, oncreated, edit = null, onedit } = $props();
 	const tags = $derived([...new Set([...images.flatMap(i => i.tags), ...(edit?.form.image ? [edit.form.image] : [])])]);
 	/* 本机没有镜像时直接从「下载」开始 */
 	function initial() {
 		if (edit) return JSON.parse(JSON.stringify(edit.form));
-		const f = emptyCreate(), first = images.flatMap(i => i.tags)[0];
+		const f = emptyCreate(), first = image || images.flatMap(i => i.tags)[0];
 		if (first) f.image = first; else f.source = 'pull';
 		return f;
 	}
 	const form = $state(initial());
 	const baseline = JSON.stringify(form);
 	let envDraft = $state('');
+	let deviceDraft = $state('');
 	/* 当前网络不在列表里（如 none、共用其他容器的网络）时也列出，避免编辑时被改掉 */
-	const extraNetwork = $derived(edit && !['bridge', 'host', ...networks].includes(edit.form.network) ? edit.form.network : '');
+	const extraNetwork = $derived(edit && !['bridge', 'host', ...networks.map(n => n.name)].includes(edit.form.network) ? edit.form.network : '');
+	const subnets = $derived((networks.find(n => n.name === form.network)?.subnets || []).filter(s => !s.includes(':')));
+	const hasTz = $derived([...form.env, envDraft].some(e => e.trim().startsWith('TZ=')));
 	let errors = $state([]);
 	let errorSummary = $state();
 	let busy = $state(false);
 	let phase = $state('');          // pull | create
 	let alive = true;
 	onDestroy(() => { alive = false; });
-	const dirty = $derived(JSON.stringify(form) !== baseline || !!envDraft.trim());
+	const dirty = $derived(JSON.stringify(form) !== baseline || !!envDraft.trim() || !!deviceDraft.trim());
 	useEditor(() => ({ dirty, busy }));
 
 	const fieldError = id => errors.filter(e => e.field === id).map(e => e.text).join(' ');
@@ -38,7 +42,9 @@
 		e.preventDefault();
 		if (busy) return;
 		if (envDraft.trim()) { form.env = [...form.env, envDraft.trim()]; envDraft = ''; }
-		errors = validateCreate(form, edit ? names.filter(n => n !== edit.name) : names).map(x => ({ text: t(x.message), field: `create-${x.field}` }));
+		if (deviceDraft.trim()) { form.devices = [...form.devices, deviceDraft.trim()]; deviceDraft = ''; }
+		errors = validateCreate(form, edit ? names.filter(n => n !== edit.name) : names, { subnets, cpus })
+			.map(x => ({ text: t(x.message, ...(x.args || [])), field: `create-${x.field}` }));
 		if (errors.length) { await tick(); errorSummary?.focus(); return; }
 		const submitted = $state.snapshot(form);
 		const image = createImage(submitted);
@@ -113,10 +119,16 @@
 				<Select id="create-network" name="createNetwork" bind:value={form.network} disabled={busy}>
 					<option value="bridge">{t('Default (separate address, publish ports below)')}</option>
 					<option value="host">{t('Same as the device (no port mapping needed)')}</option>
-					{#each networks as n}<option value={n}>{n}</option>{/each}
+					{#each networks as n}<option value={n.name}>{n.name}</option>{/each}
 					{#if extraNetwork}<option value={extraNetwork}>{extraNetwork}</option>{/if}
 				</Select>
 			</Field>
+			{#if isCustomNetwork(form.network)}
+				<Field id="create-ip" label={t('Fixed IP address')} help={subnets.length ? t('Leave empty to assign one automatically. Subnet of this network: %s', subnets.join(', ')) : t('Leave empty to assign one automatically. Only works on networks created with a subnet.')} error={fieldError('create-ip')}>
+					<Input id="create-ip" name="createIp" bind:value={form.ip} disabled={busy} placeholder={subnets.length ? subnets[0].replace(/\.\d+\/\d+$/, '.10') : '172.30.0.10'} spellcheck="false" autocomplete="off" inputmode="decimal"
+						aria-invalid={!!fieldError('create-ip')} aria-describedby={fieldError('create-ip') ? 'create-ip-help create-ip-error' : 'create-ip-help'} />
+				</Field>
+			{/if}
 			{#if form.network === 'host'}
 				<p class="hint">{t('The container uses the device ports directly. Make sure they are not used by other services.')}</p>
 			{:else}
@@ -159,6 +171,9 @@
 	<Field id="create-env" label={t('Environment variables')} help={t('One per entry, for example TZ=Asia/Shanghai')} error={fieldError('create-env')}>
 		<DynamicList id="create-env" bind:values={form.env} bind:draft={envDraft} disabled={busy} placeholder="TZ=Asia/Shanghai" spellcheck="false" autocomplete="off" />
 	</Field>
+	{#if timezone && !hasTz}
+		<div><Button size="compact" disabled={busy} onclick={() => form.env.push(`TZ=${timezone}`)} data-action="add-tz">{t('Use the router’s time zone (%s)', timezone)}</Button></div>
+	{/if}
 
 	<Field id="create-restart" label={t('Restart automatically')}>
 		<Select id="create-restart" name="createRestart" bind:value={form.restart} disabled={busy}>
@@ -166,8 +181,27 @@
 		</Select>
 	</Field>
 
-	<Disclosure title={t('Advanced')} description={t('Command and privileged mode')}>
+	<Disclosure title={t('Advanced')} description={t('Hostname, resource limits, devices, command and privileged mode')}>
 		<div class="group">
+			{#if ownNetwork(form.network)}
+				<Field id="create-hostname" label={t('Hostname')} help={t('Leave empty to use the container ID.')} error={fieldError('create-hostname')}>
+					<Input id="create-hostname" name="createHostname" bind:value={form.hostname} disabled={busy} spellcheck="false" autocomplete="off"
+						aria-invalid={!!fieldError('create-hostname')} aria-describedby={fieldError('create-hostname') ? 'create-hostname-help create-hostname-error' : 'create-hostname-help'} />
+				</Field>
+			{/if}
+			<div class="pair">
+				<Field id="create-memory" label={t('Memory limit (MB)')} help={t('Leave empty for no limit.')} error={fieldError('create-memory')}>
+					<Input id="create-memory" name="createMemory" bind:value={form.memory} disabled={busy} inputmode="numeric" placeholder="512" autocomplete="off"
+						aria-invalid={!!fieldError('create-memory')} aria-describedby={fieldError('create-memory') ? 'create-memory-help create-memory-error' : 'create-memory-help'} />
+				</Field>
+				<Field id="create-cpus" label={t('CPU limit (cores)')} help={cpus ? t('Leave empty for no limit. This device has %d cores.', cpus) : t('Leave empty for no limit.')} error={fieldError('create-cpus')}>
+					<Input id="create-cpus" name="createCpus" bind:value={form.cpus} disabled={busy} inputmode="decimal" placeholder="1.5" autocomplete="off"
+						aria-invalid={!!fieldError('create-cpus')} aria-describedby={fieldError('create-cpus') ? 'create-cpus-help create-cpus-error' : 'create-cpus-help'} />
+				</Field>
+			</div>
+			<Field id="create-devices" label={t('Devices')} help={t('Give the container access to a device, for example /dev/dri for video decoding or /dev/ttyUSB0 for a USB dongle. Write /dev/a:/dev/b to use another path inside the container.')} error={fieldError('create-devices')}>
+				<DynamicList id="create-devices" bind:values={form.devices} bind:draft={deviceDraft} disabled={busy} placeholder="/dev/dri" spellcheck="false" autocomplete="off" />
+			</Field>
 			<Field id="create-command" label={t('Command')} help={t('Replaces the image’s default command. Leave empty to keep it.')} error={fieldError('create-command')}>
 				<Input id="create-command" name="createCommand" bind:value={form.command} disabled={busy} spellcheck="false" autocomplete="off"
 					aria-invalid={!!fieldError('create-command')} aria-describedby={fieldError('create-command') ? 'create-command-help create-command-error' : 'create-command-help'} />
@@ -188,6 +222,7 @@
 	.rows-label { font-size: var(--fs-sm); font-weight: var(--fw-semibold); color: var(--heading-color); }
 	.row { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) 6rem auto; align-items: center; gap: var(--sp-2); }
 	.row.mount { grid-template-columns: minmax(0, 1.3fr) auto minmax(0, 1fr) auto auto; }
+	.pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--sp-4); }
 	.row.head { font-size: var(--fs-xs); color: var(--text-muted); }
 	.arrow { color: var(--text-muted); }
 	.hint { margin: 0; font-size: var(--fs-sm); color: var(--text-muted); }
@@ -196,5 +231,6 @@
 		.row, .row.mount { grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto; }
 		.row > :global(:nth-child(4)) { grid-column: 1 / 4; }
 		.row.head { display: none; }
+		.pair { grid-template-columns: minmax(0, 1fr); }
 	}
 </style>

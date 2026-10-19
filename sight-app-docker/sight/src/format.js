@@ -15,6 +15,8 @@ export function taskTitle(task) {
 	if (task.kind === 'pull') return t('Downloading %s…', task.image);
 	if (task.kind === 'recreate') return t(task.mode === 'update' ? 'Updating %s…' : 'Applying changes to %s…', task.name);
 	if (task.kind === 'compose') return t(COMPOSE_TITLES[task.action] || '%s', task.project);
+	if (task.kind === 'check') return t('Checking %d images for updates…', task.images?.length ?? 0);
+	if (task.kind === 'update') return t('Updating %d containers…', task.items?.length ?? 0);
 	return '';
 }
 const STEPS = {
@@ -22,7 +24,8 @@ const STEPS = {
 	compose: { pull: 'Download the images', up: 'Create and start the containers', down: 'Stop and remove the containers', files: 'Delete the project file' },
 	pull: { pull: 'Download the image' },
 };
-export const stepLabel = (task, name) => t(STEPS[task.kind]?.[name] || name);
+/* 批量更新与检查更新的步骤名即容器名、镜像引用，原样显示 */
+export const stepLabel = (task, name) => STEPS[task.kind] ? t(STEPS[task.kind][name] || name) : name;
 const COMPOSE_DONE = { up: 'Started project %s', pull: 'Updated project %s', down: 'Stopped project %s', remove: 'Deleted project %s' };
 /** 结束的任务 → { tone, text } */
 export function taskResult(task) {
@@ -42,5 +45,24 @@ export function taskResult(task) {
 	}
 	if (task.kind === 'compose')
 		return task.state === 'done' ? { tone: 'success', text: t(COMPOSE_DONE[task.action] || '%s', task.project) } : { tone: 'error', text: t('Project %s: %s', task.project, error) };
+	if (task.kind === 'check') {
+		const n = task.images?.length ?? 0, failed = task.failed || 0;
+		if (task.state !== 'done') return { tone: 'error', text: t('Could not check for updates: %s', error) };
+		return failed ? { tone: 'error', text: t('Checked %d images for updates. %d could not be checked; see the output for the reason.', n - failed, failed) }
+			: { tone: 'success', text: t('Checked %d images for updates', n) };
+	}
+	if (task.kind === 'update') {
+		const items = task.items || [], updated = items.filter(i => i.result === 'recreated').length, latest = items.filter(i => i.result === 'latest').length;
+		const parts = [];
+		if (updated) parts.push(t('Updated %d containers.', updated));
+		if (latest) parts.push(t('%d already up to date.', latest));
+		for (const i of items.filter(x => x.error)) {
+			const why = t(i.error, ...(i.error_args || []));
+			parts.push(i.rollback === 'done' ? t('Could not update %s: %s', i.name, why) + ' ' + t('The previous container was restored.')
+				: i.rollback === 'failed' ? t('Could not update %s: %s', i.name, why) + ' ' + t('Restoring the previous container also failed: %s', i.rollback_error || '')
+				: t('Could not update %s: %s', i.name, why));
+		}
+		return { tone: items.some(i => i.error) || task.state !== 'done' ? 'error' : 'success', text: parts.join(' ') || error };
+	}
 	return { tone: task.state === 'done' ? 'success' : 'error', text: task.state === 'done' ? t('Done') : error };
 }

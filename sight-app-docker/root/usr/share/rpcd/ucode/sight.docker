@@ -216,7 +216,10 @@ function call_docker(method, path, options) {
 		};
 	}
 	
-	const response_parts = split(response_buff, /\r?\n\r?\n/, 2);
+	/* 按位置切开头部与正文：正则在 NUL 处截断，日志的多路复用帧头含 NUL，头部与正文同在首个分段时正文会被截掉 */
+	let sep = index(response_buff, '\r\n\r\n'), sep_len = 4;
+	if (sep < 0) { sep = index(response_buff, '\n\n'); sep_len = 2; }
+	const response_parts = sep < 0 ? [response_buff, ''] : [substr(response_buff, 0, sep), substr(response_buff, sep + sep_len)];
 	const response_headers = read_http_headers({}, response_parts[0]);
 	let response_body;
 
@@ -412,12 +415,13 @@ const FULL_ID = /^[a-f0-9]{64}$/;
 const NAME_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_.-]+$/;
 /* Compose 项目名：小写字母、数字、- 与 _，字母或数字开头（与 Compose 规范一致） */
 const PROJECT_PATTERN = /^[a-z0-9][a-z0-9_-]{0,62}$/;
-const LOG_LIMIT = 262144;
+const LOG_LIMIT = 524288, LOG_TAIL_MAX = 5000;
 /* 镜像引用：[仓库主机[:端口]/]路径[:标签 | @sha256:摘要]，只含字母数字与 . _ - : / @，不会被 shell 解释 */
 const IMAGE_PATTERN = /^([A-Za-z0-9.-]+(:[0-9]+)?\/)?[a-z0-9]+([._-]+[a-z0-9]+)*(\/[a-z0-9]+([._-]+[a-z0-9]+)*)*(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}|@sha256:[a-f0-9]{64})?$/;
 const TASK_DIR = '/tmp/sight-docker';
 const TASK = TASK_DIR + '/task.json', TASK_LOG = TASK_DIR + '/task.log', TASK_LOCK = TASK_DIR + '/start.lock';
 const TASK_RUNNER = '/usr/libexec/sight-docker-task';
+const UPDATES = TASK_DIR + '/updates.json';
 const OUTPUT_LIMIT = 16384;
 /* 后台任务刚起、尚未写入 pid 时的宽限（秒） */
 const SPAWN_GRACE = 30;
@@ -443,17 +447,49 @@ function demux(raw) {
 	return join('', out);
 }
 
-/* 容器日志转成纯文本：不依赖 docker CLI 与本机套接字，dockerd 在其它主机（globals.hosts）时同样可读 */
+/* 容器日志转成纯文本：不依赖 docker CLI 与本机套接字，dockerd 在其它主机（globals.hosts）时同样可读。
+   每行带时间戳；since（UNIX 秒，可带小数）只取此后的记录，供页面跟随时增量读取。超过上限时从最早的整行截掉 */
 function container_logs(request) {
-	const id = request.args?.id, tail = int(request.args?.tail) || 200;
+	const id = request.args?.id, tail = int(request.args?.tail) || 200, since = request.args?.since;
 	if (type(id) != 'string' || !match(id, ID_PATTERN))
 		return { code: 400, body: { message: 'Invalid container id' } };
-	const r = call_docker('GET', `/containers/${id}/logs`, { query: { stdout: 1, stderr: 1, timestamps: 1, tail: min(max(tail, 1), 1000) } });
+	const query = { stdout: 1, stderr: 1, timestamps: 1, tail: min(max(tail, 1), LOG_TAIL_MAX) };
+	if (since != null && since != '') {
+		if (type(since) != 'string' || !match(since, /^[0-9]{1,12}(\.[0-9]{1,9})?$/))
+			return { code: 400, body: { message: 'Invalid since' } };
+		query.since = since;
+	}
+	const r = call_docker('GET', `/containers/${id}/logs`, { query: query });
 	if (r.code >= 300) return { code: r.code, body: r.body };
 	let raw = type(r.body) == 'string' ? r.body : '';
 	let text = demux(raw) ?? raw;
-	if (length(text) > LOG_LIMIT) text = substr(text, length(text) - LOG_LIMIT);
+	if (length(text) > LOG_LIMIT) {
+		text = substr(text, length(text) - LOG_LIMIT);
+		const nl = index(text, '\n');
+		if (nl >= 0) text = substr(text, nl + 1);
+	}
 	return { code: 200, body: { text: text } };
+}
+
+/* 运行中容器的资源采样（一次性 stats），只留页面计算 CPU 与内存所需的字段，一次往返取全部；
+   states 为全部容器的状态，页面据此发现容器增减与启停 */
+function container_usage() {
+	const r = call_docker('GET', '/containers/json', { query: { all: true } });
+	if (r.code >= 300) return { code: r.code, body: r.body };
+	const states = {}, samples = {};
+	for (let c in (type(r.body) == 'array' ? r.body : [])) {
+		states[c.Id] = c.State;
+		if (c.State != 'running') continue;
+		const s = call_docker('GET', `/containers/${c.Id}/stats`, { query: { stream: false, 'one-shot': true } });
+		if (s.code >= 300 || type(s.body) != 'object') continue;
+		const cpu = s.body.cpu_stats || {}, mem = s.body.memory_stats || {};
+		samples[c.Id] = {
+			cpu_stats: { cpu_usage: { total_usage: cpu.cpu_usage?.total_usage }, system_cpu_usage: cpu.system_cpu_usage,
+				online_cpus: cpu.online_cpus || length(cpu.cpu_usage?.percpu_usage || []) || null },
+			memory_stats: { usage: mem.usage, limit: mem.limit, stats: { inactive_file: mem.stats?.inactive_file ?? mem.stats?.total_inactive_file } },
+		};
+	}
+	return { code: 200, body: { states: states, samples: samples } };
 }
 
 function read_json(path) {
@@ -484,10 +520,15 @@ function current_task() {
 }
 
 /* 返回给页面的任务：去掉新建参数（可能很大，页面已有） */
-function public_task(t) {
-	if (!t) return null;
+function without_body(t) {
 	const out = {};
 	for (let k, v in t) if (k != 'body') out[k] = v;
+	return out;
+}
+function public_task(t) {
+	if (!t) return null;
+	const out = without_body(t);
+	if (type(out.items) == 'array') out.items = map(out.items, without_body);
 	return out;
 }
 
@@ -537,6 +578,45 @@ function recreate_start(request) {
 		return { error: 'invalid image' };
 	return start_task({ kind: 'recreate', mode: mode, id: r.body.Id, name: ltrim(r.body.Name, '/'), new_name: name || null,
 		image: image, body: body, steps: ['pull', 'stop', 'create', 'start', 'cleanup'] });
+}
+
+const valid_tag_ref = (image) => type(image) == 'string' && length(image) <= 255 && !!match(image, IMAGE_PATTERN) && index(image, '@') < 0;
+
+/* 检查更新：只向仓库查询标签当前对应的摘要（GET /distribution，不下载），结果写入 UPDATES，
+   由页面与本机镜像的摘要比对。仓库可能很慢，放在后台任务里，不占用 rpcd */
+function check_start(request) {
+	const images = request.args?.images;
+	if (type(images) != 'array' || !length(images) || length(images) > 100) return { error: 'invalid' };
+	const list = [];
+	for (let image in images) {
+		if (!valid_tag_ref(image)) return { error: 'invalid image' };
+		if (!(image in list)) push(list, image);
+	}
+	return start_task({ kind: 'check', images: list, steps: list });
+}
+
+/* 最近一次检查的结果：{ 镜像引用: { digest, checked } | { error, checked } } */
+function check_list() {
+	return { images: read_json(UPDATES) || {} };
+}
+
+/* 批量更新：items 为 [{ id, body }]，body 同 recreate_start（页面按 inspect 构造）；逐个拉取原镜像引用，
+   有新版才重建，失败的恢复原容器后继续下一个 */
+function update_start(request) {
+	const items = request.args?.items;
+	if (type(items) != 'array' || !length(items) || length(items) > 50) return { error: 'invalid' };
+	const list = [];
+	for (let it in items) {
+		if (type(it) != 'object' || type(it.id) != 'string' || !match(it.id, ID_PATTERN) || type(it.body) != 'object')
+			return { error: 'invalid' };
+		const r = call_docker('GET', `/containers/${it.id}/json`);
+		if (r.code == 404) return { error: 'not_found' };
+		if (r.code >= 300) return { code: r.code, error: r.body?.message || 'failed' };
+		if (!valid_tag_ref(r.body.Config?.Image)) return { error: 'invalid image' };
+		for (let x in list) if (x.id == r.body.Id) return { error: 'invalid' };
+		push(list, { id: r.body.Id, name: ltrim(r.body.Name, '/'), image: r.body.Config.Image, body: it.body });
+	}
+	return start_task({ kind: 'update', items: list, steps: map(list, (x) => x.name) });
 }
 
 /* ---- Compose 项目：文件在 /etc/sight-docker/compose/<项目名>/compose.yaml ---- */
@@ -749,10 +829,14 @@ function terminal_stop(request) {
 }
 
 const sight_methods = {
-	logs:            { args: { id: '', tail: 200 }, call: container_logs },
+	logs:            { args: { id: '', tail: 200, since: '' }, call: container_logs },
+	usage:           { args: {}, call: container_usage },
 	task_status:     { args: {}, call: task_status },
 	pull_start:      { args: { image: '' }, call: pull_start },
 	recreate_start:  { args: { id: '', mode: '', name: '', body: {} }, call: recreate_start },
+	check_start:     { args: { images: [] }, call: check_start },
+	check_list:      { args: {}, call: check_list },
+	update_start:    { args: { items: [] }, call: update_start },
 	compose_list:    { args: {}, call: compose_list },
 	compose_read:    { args: { name: '' }, call: compose_read },
 	compose_write:   { args: { name: '', content: '', create: false }, call: compose_write },

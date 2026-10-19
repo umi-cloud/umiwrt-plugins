@@ -8,8 +8,8 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=sight-app-docker
-PKG_VERSION:=1.4.0
-PKG_RELEASE:=3
+PKG_VERSION:=1.5.0
+PKG_RELEASE:=1
 
 # root/usr/share/rpcd/ucode/sight.docker 与 root/usr/share/ucode/sight/docker_socket.uc 为 Apache-2.0
 PKG_LICENSE:=GPL-2.0-only Apache-2.0

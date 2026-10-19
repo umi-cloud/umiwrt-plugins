@@ -4,14 +4,16 @@
  *   1. rpcd 接口签名逐字比对
  *   2. ACL：页面所需权限只来自本包的 sight-plugin-docker 组；不放行 docker CLI、exec 进容器、写容器文件、原始拉取/导入镜像；
  *      sight.docker 的方法拒绝不合格的参数（镜像引用、项目名、终端监听地址）
- *   3. 容器停止/启动/重启回读、详情与日志（设备端解复用）、资源占用、修改重启策略、使用中的镜像不可删除
+ *   3. 容器停止/启动/重启回读、列表的 CPU 与内存、在别处启停后列表自动回读、详情与日志（设备端解复用；行数、筛选、时间、跟随、下载）、
+ *      资源占用、修改重启策略、使用中的镜像不可删除
  *   4. 终端：一次性 ttyd 会话（页面启动/结束；监听地址、一次性路径、来源校验、单连接、无人连接超时、HTTPS）；
  *      经 websocket 在容器里执行命令（宿主需有 node:22-alpine 镜像，在设备容器的网络命名空间里运行探针）
  *   5. 新建容器（端口、只读目录、环境变量、命令）并启动，列表与详情的「打开」链接，再删除
  *   6. 下载镜像（后台任务）与清理未使用的镜像
  *   7. 更新容器：有新版时用原配置重建（配置、标签、匿名卷数据保留），再次更新提示「已是最新」
- *   8. 编辑容器重建；端口冲突时重建失败并恢复原容器
- *   9. 网络与卷的新建、删除，清理未使用的卷
+ *   8. 编辑容器重建；端口冲突时重建失败并恢复原容器；批量更新（失败的跳过、其余照常更新）与检查更新（只查仓库摘要，不下载）
+ *   9. 网络与卷的新建、删除，清理未使用的卷；在自定义网络上新建带固定地址、主机名、内存/CPU 上限、设备与时区的容器，编辑后重建
+ *  9b. 存储空间：各项占用，删除已停止的容器（测试前提 sight-job 删除后按原命令重建）
  *  10. Compose：新建项目、启动、编辑后重建、拉取更新、停止、删除（连同卷）；别处创建的项目只读显示并可停止
  *  11. 设置：镜像加速与数据目录写入 uci、经 reload 生效再恢复；未配置加速时一键使用国内镜像；窄屏截图；
  *      宿主有 sight.storage 时挂一块 ext4 的 loop 盘，核对数据盘建议与一键填入（只在有调试容器标记时做）
@@ -43,6 +45,8 @@ const DIND = cmd => LOCAL ? sh(cmd)
 const shIn = (cmd, input) => execFileSync('docker', ['exec', '-i', CONTAINER, 'sh', '-c', cmd], { encoding: 'utf8', input });
 const NEW = 'sight-flow-new', UPD = 'sight-flow-upd', PULL = 'hello-world:latest', MIRROR = 'https://mirror.sight-flow.example';
 const NET = 'sight-flow-net', VOL = 'sight-flow-vol', PRUNE_VOL = 'sight-flow-prune', PROJECT = 'sightflow', EXT = 'sightext';
+const LIM = 'sight-flow-lim', UPD2 = 'sight-flow-upd2', BAD = 'sight-flow-bad', BAD_REF = 'sightflow/nonexistent:latest', STOPPED = 'sight-flow-stopped';
+const UPDATES = '/tmp/sight-docker/updates.json';
 const FLOW_ROOT = '/tmp/docker-flow/';
 const PRESETS = ['https://docker.1ms.run', 'https://docker.m.daocloud.io'];
 const LAN = '192.168.1.1';
@@ -76,8 +80,9 @@ contract('sight.docker.image', { list: { query: 'Table' }, inspect: { id: 'Strin
 contract('sight.docker.network', { list: { query: 'Table' }, create: { body: 'Table' }, remove: { id: 'String' } });
 contract('sight.docker.volume', { list: { query: 'Table' }, create: { opts: 'Table' }, remove: { id: 'String', query: 'Table' }, prune: { query: 'Table' } });
 contract('sight.docker', {
-	logs: { id: 'String', tail: 'Integer' }, task_status: {}, pull_start: { image: 'String' },
+	logs: { id: 'String', tail: 'Integer', since: 'String' }, usage: {}, task_status: {}, pull_start: { image: 'String' },
 	recreate_start: { id: 'String', mode: 'String', name: 'String', body: 'Table' },
+	check_start: { images: 'Array' }, check_list: {}, update_start: { items: 'Array' },
 	compose_list: {}, compose_read: { name: 'String' }, compose_write: { name: 'String', content: 'String', create: 'Boolean' }, compose_start: { name: 'String', action: 'String', volumes: 'Boolean' },
 	terminal_start: { id: 'String', host: 'String', tls: 'Boolean' }, terminal_status: { id: 'String' }, terminal_stop: { id: 'String' },
 });
@@ -89,7 +94,7 @@ await withAclUser(['sight-ui'], async sid => {
 await withAclUser(['sight-ui', 'sight-plugin-docker'], async sid => {
 	for (const [o, m, p] of [['sight.docker', 'version', {}], ['sight.docker.container', 'list', { query: { all: true } }], ['sight.docker.image', 'list', {}], ['sight.docker.network', 'list', { query: {} }],
 		['sight.docker.volume', 'list', { query: {} }], ['sight.docker', 'task_status', {}], ['sight.docker', 'compose_list', {}], ['sight.docker', 'terminal_status', { id: 'sight-web' }],
-		['sight.docker', 'logs', { id: 'sight-job', tail: 5 }], ['uci', 'get', { config: 'dockerd' }]])
+		['sight.docker', 'logs', { id: 'sight-job', tail: 5 }], ['sight.docker', 'usage', {}], ['sight.docker', 'check_list', {}], ['uci', 'get', { config: 'dockerd' }]])
 		check((await ubus(sid, o, m, p))?.[0] === 0, `加上本包权限组后可调用 ${o}.${m}`);
 	/* 写操作用不存在的对象试探：放行时由 Docker 回 4xx，而不是被 ACL 拒绝 */
 	const missing = 'sight-flow-missing';
@@ -106,10 +111,15 @@ await withAclUser(['sight-ui', 'sight-plugin-docker'], async sid => {
 	const badAction = await ubus(sid, 'sight.docker', 'compose_start', { name: 'x;id', action: 'up', volumes: false });
 	const badHost = await ubus(sid, 'sight.docker', 'terminal_start', { id: 'sight-web', host: '8.8.8.8', tls: false });
 	const badId = await ubus(sid, 'sight.docker', 'terminal_start', { id: '-it', host: LAN, tls: false });
+	const badCheck = await ubus(sid, 'sight.docker', 'check_start', { images: ['busybox; touch /tmp/sight-flow-pwned'] });
+	const badDigest = await ubus(sid, 'sight.docker', 'check_start', { images: [`alpine@sha256:${'a'.repeat(64)}`] });
+	const badItems = await ubus(sid, 'sight.docker', 'update_start', { items: [{ id: '-x', body: {} }] });
+	const badSince = await ubus(sid, 'sight.docker', 'logs', { id: 'sight-job', tail: 5, since: '1; id' });
 	check(injected?.[1]?.error === 'invalid image' && badRecreate?.[1]?.error === 'invalid image' && badMode?.[1]?.error === 'invalid' && badProject?.[1]?.error === 'invalid'
 		&& badAction?.[1]?.error === 'invalid' && badHost?.[1]?.error === 'not_lan' && badId?.[1]?.error === 'invalid'
-		&& sh('[ -e /tmp/sight-flow-pwned ] && echo yes || echo no').trim() === 'no', 'sight.docker 拒绝不合格的镜像引用、模式、项目名、终端监听地址与容器 ID',
-	{ injected, badRecreate, badMode, badProject, badAction, badHost, badId });
+		&& badCheck?.[1]?.error === 'invalid image' && badDigest?.[1]?.error === 'invalid image' && badItems?.[1]?.error === 'invalid' && badSince?.[1]?.code === 400
+		&& sh('[ -e /tmp/sight-flow-pwned ] && echo yes || echo no').trim() === 'no', 'sight.docker 拒绝不合格的镜像引用（含检查更新）、模式、项目名、终端监听地址、容器 ID 与日志起始时间',
+	{ injected, badRecreate, badMode, badProject, badAction, badHost, badId, badCheck, badDigest, badItems, badSince });
 	const cli = await ubus(sid, 'file', 'exec', { command: '/usr/bin/docker', params: ['logs', '--tail', '200', '--timestamps', 'f'.repeat(64)] });
 	check(cli?.[0] === 6, '不放行 docker CLI', cli);
 	const rejected = [
@@ -121,6 +131,14 @@ await withAclUser(['sight-ui', 'sight-plugin-docker'], async sid => {
 	];
 	check(rejected.every(denied), 'exec、写容器文件、原始拉取/导入镜像、批量清理容器、网络连接、改名与直接写文件仍未授权', rejected);
 });
+
+/* 测试前提 sight-job（已退出、日志含 job done）被清理删除后按原镜像与命令重建 */
+const quote = a => `'${String(a).replace(/'/g, `'\\''`)}'`;
+function restoreJob() {
+	if (!original.job || exists('sight-job')) return;
+	const entry = original.job.Entrypoint?.length ? `--entrypoint ${quote(original.job.Entrypoint[0])} ` : '';
+	DIND(`docker run --name sight-job ${entry}${quote(original.job.Image)} ${[...(original.job.Entrypoint || []).slice(1), ...(original.job.Cmd || [])].map(quote).join(' ')} >/dev/null 2>&1; true`);
+}
 
 let dockerReady = false;
 try { DIND('docker start sight-web >/dev/null; docker inspect sight-job >/dev/null'); dockerReady = /"code":\s*200/.test(sh('ubus call sight.docker version')); } catch { dockerReady = false; }
@@ -141,6 +159,8 @@ if (dockerReady) {
 	original.hadPull = DIND(`docker image inspect ${PULL} >/dev/null 2>&1 && echo yes || echo no`).trim() === 'yes';
 	original.hadLatest = DIND('docker image inspect busybox:latest >/dev/null 2>&1 && echo yes || echo no').trim() === 'yes';
 	original.hadMusl = DIND('docker image inspect busybox:musl >/dev/null 2>&1 && echo yes || echo no').trim() === 'yes';
+	original.updates = sh(`cat ${UPDATES} 2>/dev/null || true`);
+	original.job = JSON.parse(DIND('docker inspect sight-job'))[0].Config;
 }
 
 try {
@@ -196,6 +216,22 @@ try {
 		await confirmDialog('Restart');
 		await waitFor(`/Restarted sight-web/.test(${main})`, '重启容器', 40000);
 		check(containerRunning('sight-web'), '重启后运行');
+		const row = name => `(document.querySelector('tr[data-container="${name}"]')?.textContent || '')`;
+		await waitFor(`/\\d+\\.\\d%/.test(${row('sight-web')})`, '列表显示 CPU 占用', 20000);
+		check(await page.evaluate(`!/%/.test(${row('sight-job')})`), '列表显示运行中容器的 CPU 与内存，已停止的不显示');
+		/* 在设备上直接启停：列表随资源采样发现变化后自动回读 */
+		DIND('docker stop -t 1 sight-web >/dev/null');
+		await waitFor(`/Stopped/.test(${row('sight-web')})`, '别处停止后列表自动更新', 20000);
+		DIND('docker start sight-web >/dev/null');
+		await waitFor(`/Running/.test(${row('sight-web')})`, '别处启动后列表自动更新', 20000);
+		check(true, '在设备上启停容器后，列表无需刷新即自动更新');
+		await setAll('[data-container-search]', ['JOB']);
+		await waitFor(`!document.querySelector('tr[data-container="sight-web"]') && !!document.querySelector('tr[data-container="sight-job"]')`, '容器搜索');
+		await setAll('[data-container-search]', ['zzz-none']);
+		await waitFor(`/No containers match the search/.test(${main})`, '搜索无结果');
+		await setAll('[data-container-search]', ['']);
+		await waitFor(`!!document.querySelector('tr[data-container="sight-web"]')`, '清空搜索');
+		check(true, '容器列表按名称等搜索（不区分大小写），无结果时说明');
 
 		section('详情：日志、资源占用、重启策略');
 		await openContainer('sight-job');
@@ -212,6 +248,42 @@ try {
 		const usageText = await page.evaluate(`${drawer}.querySelector('[data-usage]').textContent`);
 		check(/CPU\s*\d+\.\d%/.test(usageText) && /Memory/.test(usageText), '资源占用显示 CPU 百分比与内存（嵌套容器取不到内存时显示不可用）', usageText);
 		await screenshot('docker-usage');
+
+		/* 日志工具：往容器主进程的标准输出写入记录 */
+		const emit = text => DIND(`docker exec sight-web sh -c 'echo ${text} > /proc/1/fd/1'`);
+		const logView = `(${drawer}.querySelector('[data-logs] pre')?.textContent || '')`;
+		emit('flow-log-1');
+		await page.evaluate(`[...${drawer}.querySelectorAll('[data-logs] button')].find(b => b.textContent.trim() === 'Refresh logs').click()`);
+		await waitFor(`/flow-log-1/.test(${logView})`, '日志读到新记录');
+		await setAll('dialog.drawer[open] [data-log-search]', ['zzz-no-match']);
+		await waitFor(`/No lines match the search/.test(${drawer}.querySelector('[data-logs]').textContent)`, '日志筛选无结果');
+		await setAll('dialog.drawer[open] [data-log-search]', ['FLOW-LOG']);
+		await waitFor(`/flow-log-1/.test(${logView}) && /\\d+ of \\d+ lines/.test(${drawer}.querySelector('[data-logs]').textContent)`, '日志按关键字筛选（不区分大小写）');
+		check(true, '日志按关键字筛选，无结果时说明');
+		await setAll('dialog.drawer[open] [data-log-search]', ['']);
+		await page.evaluate(`[...${drawer}.querySelectorAll('[data-logs] label')].find(l => l.textContent.trim() === 'Show time').querySelector('input').click()`);
+		await waitFor(`/^\\d\\d-\\d\\d \\d\\d:\\d\\d:\\d\\d  flow-log-1$/m.test(${logView})`, '日志显示时间');
+		check(true, '日志可显示每行的时间（浏览器时区）');
+		await setAll('dialog.drawer[open] [data-log-lines]', ['1000']);
+		await sleep(1500);
+		await screenshot('docker-logs-lines');
+		await waitFor(`/flow-log-1/.test(${logView})`, '改行数后重读');
+		check(await page.evaluate(`${drawer}.querySelector('[data-log-lines]').value`) === '1000', '日志行数可选 200/1000/5000');
+		await page.evaluate(`${drawer}.querySelector('[data-log-follow]').click()`);
+		await sleep(500);
+		emit('flow-follow-2');
+		await waitFor(`/flow-follow-2/.test(${logView})`, '跟随：新记录自动出现', 15000);
+		emit('flow-follow-3');
+		await waitFor(`/flow-follow-3/.test(${logView})`, '跟随：继续追加', 15000);
+		check(await page.evaluate(`${logView}.split('\\n').filter(l => /flow-follow-2/.test(l)).length === 1`), '跟随时只追加新记录，不重复');
+		await page.evaluate(`${drawer}.querySelector('[data-log-follow]').click()`);
+		/* 下载：截住生成的文件 */
+		await page.evaluate(`(() => { window.__flowBlob = null; const create = URL.createObjectURL; URL.createObjectURL = b => { window.__flowBlob = b; return create.call(URL, b); };
+			const click = HTMLAnchorElement.prototype.click; HTMLAnchorElement.prototype.click = function () { if (this.download) { window.__flowName = this.download; return; } return click.call(this); }; })()`);
+		await page.evaluate(`${drawer}.querySelector('[data-log-download]').click()`);
+		const dl = await page.evaluate(`(async () => ({ name: window.__flowName, text: await window.__flowBlob?.text() }))()`);
+		check(/^sight-web-.+\.log$/.test(dl.name || '') && /flow-follow-3/.test(dl.text || ''), '下载当前显示的日志', dl.name);
+		await screenshot('docker-logs');
 		const target = original.policy === 'always' ? 'on-failure' : 'always';
 		for (const [policy, label] of [[target, `重启策略写入容器（${target}）`], [original.policy, '重启策略经界面恢复']]) {
 			await fill({ 'docker-restart-policy': policy });
@@ -333,6 +405,14 @@ try {
 
 		section('下载与清理镜像');
 		await tab('Images');
+		check(await page.evaluate(`location.hash`) === '#/docker?tab=images', '分区写进地址（?tab=）', await page.evaluate(`location.hash`));
+		await go('#/docker?tab=storage', `!!document.querySelector('[data-storage]')`);
+		await go('#/docker?tab=images', `!!document.querySelector('tr[data-image="busybox:stable"]')`);
+		check(true, '按地址打开对应分区（刷新、后退时停在原分区）');
+		await page.evaluate(`document.querySelector('tr[data-image="busybox:stable"] [data-action=create-from]').click()`);
+		await waitFor(`!!document.querySelector('[data-create-form]')`, '从镜像新建');
+		check(await page.evaluate(`document.getElementById('create-image').value`) === 'busybox:stable', '镜像列表可直接用该镜像新建容器');
+		await closeDrawer();
 		check(await page.evaluate(`[...document.querySelectorAll('tr[data-image="busybox:stable"] .actions button')].find(b => b.textContent.trim() === 'Remove')?.disabled === true`), '使用中的镜像不可删除');
 		await page.evaluate(`document.querySelector('[data-action=pull]').click()`);
 		await waitFor(`!!document.querySelector('[data-pull-form]')`, '下载表单');
@@ -437,6 +517,53 @@ try {
 			'端口冲突时重建失败：删掉新容器、恢复原容器的名字与运行状态', { text: rb.text, task: rb.task });
 			await screenshot('docker-rollback');
 			await dismissTask();
+
+			section('批量更新与检查更新');
+			const real = DIND(`docker image inspect -f '{{.Id}}' busybox:latest`).trim();
+			if (real && real !== DIND(`docker image inspect -f '{{.Id}}' busybox:musl`).trim()) {
+				/* 只让流程自建的容器出现在「全部更新」里：清掉检查结果，有新版只靠本机标签判断。
+				   UPD2 跑在旧镜像上、标签已指向新版；BAD 的标签指向新版，但仓库里没有这个镜像，更新时拉取失败 */
+				sh(`rm -f ${UPDATES}`);
+				DIND(`docker tag busybox:musl busybox:latest && docker run -d --name ${UPD2} busybox:latest sleep 3600 >/dev/null && docker tag ${real} busybox:latest`);
+				DIND(`docker tag busybox:musl ${BAD_REF} && docker run -d --name ${BAD} ${BAD_REF} sleep 3600 >/dev/null && docker tag ${real} ${BAD_REF}`);
+				const badBefore = JSON.parse(DIND(`docker inspect ${BAD}`))[0];
+				await refresh();
+				const badge = name => `!!document.querySelector('tr[data-container="${name}"] [data-update-available]')`;
+				await waitFor(`${badge(UPD2)} && ${badge(BAD)}`, '本机标签已指向新镜像的容器标为可更新');
+				check(await page.evaluate(`!${badge(UPD)} && !${badge('sight-web')}`), '本机标签已指向新镜像的容器标为可更新，其余不标');
+				await page.evaluate(`document.querySelector('[data-action=update-all]').click()`);
+				await waitFor(`!!document.querySelector('dialog[role=alertdialog][open] [data-update-all-dialog]')`, '全部更新确认');
+				const listed = await page.evaluate(`[...document.querySelectorAll('[data-update-all-dialog] li .mono')].map(e => e.textContent.trim())`);
+				check(listed.join() === [BAD, UPD2].join(), '全部更新的确认框列出要更新的容器', listed);
+				since = now();
+				await confirmDialog('Update');
+				const all = await taskDone('批量更新', since, '[data-docker-task]', 300000);
+				const upd2 = JSON.parse(DIND(`docker inspect ${UPD2}`))[0];
+				const bad = JSON.parse(DIND(`docker inspect ${BAD}`))[0];
+				const steps = await page.evaluate(`[...document.querySelectorAll('[data-docker-task] [data-step]')].map(e => e.dataset.step + ':' + e.dataset.stepState).join()`);
+				check(all.task.kind === 'update' && steps === `${BAD}:failed,${UPD2}:done` && upd2.Image === real && upd2.State.Running
+					&& bad.Id === badBefore.Id && bad.State.Running && !exists(`${BAD}-sight-old`) && !exists(`${UPD2}-sight-old`),
+				'批量更新逐个进行：拉取失败的保持原样，其余照常重建到新版', { steps, task: all.task });
+				check(all.state === 'failed' && /Updated 1 containers\./.test(all.text) && all.text.includes(`Could not update ${BAD}`), '结果说明更新了几个、哪个失败及原因', all.text);
+				await screenshot('docker-update-all');
+				await dismissTask();
+
+				const imagesBefore = DIND(`docker images -q --no-trunc | sort`).trim();
+				since = now();
+				await page.evaluate(`document.querySelector('[data-action=check-updates]').click()`);
+				const chk = await taskDone('检查更新', since, '[data-docker-task]', 180000);
+				const results = sd('check_list').images || {};
+				check(chk.task.kind === 'check' && ['busybox:stable', 'busybox:latest', BAD_REF].every(r => chk.task.images.includes(r)) && results[BAD_REF]?.error
+					&& DIND(`docker images -q --no-trunc | sort`).trim() === imagesBefore, '检查更新逐个查询仓库（不下载镜像），查不到的如实记下', { task: chk.task, results });
+				if (results['busybox:latest']?.digest) {
+					check(chk.state === 'done' && /could not be checked/.test(chk.text) && await page.evaluate(`/Checked for updates/.test(document.querySelector('[data-docker] ~ * [role=group], main').textContent)`),
+						'结果说明有几个未能检查，列表显示最近一次检查时间', chk.text);
+					check(await page.evaluate(`!${badge(UPD2)} && ${badge(BAD)}`), '仓库摘要与本机一致的不标可更新', results['busybox:latest']);
+				} else check(false, '检查更新（需要外网访问 Docker Hub 或镜像加速）', results);
+				await screenshot('docker-check');
+				await dismissTask();
+				DIND(`docker rm -f ${UPD2} ${BAD} >/dev/null; docker rmi ${BAD_REF} >/dev/null 2>&1; true`);
+			} else check(false, '批量更新（需要前面的更新流程拉到新版 busybox:latest）');
 		}
 
 		section('网络与卷');
@@ -454,6 +581,59 @@ try {
 		await waitFor(`!!document.querySelector('tr[data-network="${NET}"]')`, '新建网络', 30000);
 		const net = JSON.parse(DIND(`docker network inspect ${NET}`))[0];
 		check(net.IPAM.Config[0].Subnet === '172.31.250.0/24' && net.IPAM.Config[0].Gateway === '172.31.250.1' && net.Driver === 'bridge', '新建网络：子网与网关写入 Docker', net.IPAM);
+
+		section('新建容器：固定地址、主机名、资源限制、设备与时区');
+		const zone = sh('uci -q get system.@system[0].zonename || true').trim();
+		/* 嵌套容器可能没有下放 memory/cpu 控制器，带限制的容器起不来：此时只新建不启动，按写入的配置核对 */
+		const limitsWork = DIND('docker run --rm --memory 64m --cpus 0.5 busybox:stable true >/dev/null 2>&1 && echo yes || echo no').trim() === 'yes';
+		if (!limitsWork) check(true, '本环境不支持内存/CPU 限制（cgroup 控制器未下放），带限制的容器只新建不启动');
+		await tab('Containers');
+		await page.evaluate(`document.querySelector('[data-action=create]').click()`);
+		await waitFor(`!!document.querySelector('[data-create-form]')`, '新建容器表单');
+		await fill({ 'create-image': 'busybox:stable', 'create-name': LIM, 'create-network': NET });
+		await waitFor(`!!document.getElementById('create-ip')`, '自定义网络显示固定地址');
+		check(await page.evaluate(`document.getElementById('create-ip-help').textContent.includes('172.31.250.0/24')`), '选自定义网络时可填固定地址，并给出网络的子网');
+		await fill({ 'create-ip': '10.1.1.1', 'create-memory': '3', 'create-cpus': '999' });
+		await page.evaluate(`document.querySelector('[data-create-form]').requestSubmit()`);
+		await waitFor(`!!document.querySelector('[data-create-form] .error-summary')`, '新字段校验');
+		const errText = await page.evaluate(`document.querySelector('[data-create-form] .error-summary').textContent`);
+		check(/subnet 172\.31\.250\.0\/24/.test(errText) && /at least 6/.test(errText) && /CPU cores from 0\.01/.test(errText), '固定地址不在子网内、内存过小、CPU 超过核数时说明原因', errText);
+		await fill({ 'create-ip': '172.31.250.10', 'create-hostname': 'flow-host', 'create-memory': '64', 'create-cpus': '0.5', 'create-devices': '/dev/full', 'create-command': 'sleep 3600' });
+		if (zone) {
+			await page.evaluate(`document.querySelector('[data-action=add-tz]').click()`);
+			await waitFor(`document.querySelector('[data-create-form]').textContent.includes('TZ=${zone}') && !document.querySelector('[data-action=add-tz]')`, '一键加入路由器时区');
+		}
+		await page.evaluate(`document.querySelector('[data-create-form] details').open = true`);
+		if (!limitsWork) await page.evaluate(`[...document.querySelectorAll('[data-create-form] label')].find(l => /Start the container after creating it/.test(l.textContent)).querySelector('input').click()`);
+		await screenshot('docker-create-limits');
+		await page.evaluate(`document.querySelector('[data-create-form]').requestSubmit()`);
+		await waitFor(limitsWork ? `/Created and started ${LIM}/.test(${main})` : `/Created ${LIM}/.test(${main}) && !!document.querySelector('tr[data-container="${LIM}"]')`, '新建带限制的容器', 40000);
+		const lim = JSON.parse(DIND(`docker inspect ${LIM}`))[0];
+		const ipOf = c => limitsWork ? c.NetworkSettings.Networks[NET]?.IPAddress : c.NetworkSettings.Networks[NET]?.IPAMConfig?.IPv4Address;
+		check(lim.State.Running === limitsWork && ipOf(lim) === '172.31.250.10' && lim.Config.Hostname === 'flow-host'
+			&& lim.HostConfig.Memory === 64 * 1048576 && lim.HostConfig.NanoCpus === 5e8 && lim.HostConfig.Devices?.[0]?.PathOnHost === '/dev/full'
+			&& (!zone || lim.Config.Env.includes(`TZ=${zone}`)), '新建的容器使用固定地址、主机名、内存/CPU 上限、设备直通与路由器时区',
+		{ ip: ipOf(lim), host: lim.Config.Hostname, mem: lim.HostConfig.Memory, cpu: lim.HostConfig.NanoCpus, dev: lim.HostConfig.Devices, env: lim.Config.Env });
+		if (LOCAL) {
+			await openContainer(LIM);
+			await page.evaluate(`${drawer}.querySelector('[data-action=edit]').click()`);
+			await waitFor(`!!document.querySelector('[data-create-form="edit"]')`, '编辑表单');
+			const pre = await page.evaluate(`({ ip: document.getElementById('create-ip')?.value, host: document.getElementById('create-hostname').value, mem: document.getElementById('create-memory').value, cpu: document.getElementById('create-cpus').value, dev: document.querySelector('[data-create-form]').textContent.includes('/dev/full') })`);
+			check(pre.ip === '172.31.250.10' && pre.host === 'flow-host' && pre.mem === '64' && pre.cpu === '0.5' && pre.dev, '编辑表单预填固定地址、主机名、资源限制与设备', pre);
+			await fill({ 'create-memory': '96', 'create-ip': '172.31.250.11' });
+			since = now();
+			await page.evaluate(`document.querySelector('[data-create-form]').requestSubmit()`);
+			const le = await taskDone('编辑资源限制', since, '[data-docker-task]', 120000);
+			const limEdited = JSON.parse(DIND(`docker inspect ${LIM}`))[0];
+			check(le.state === 'done' && limEdited.HostConfig.Memory === 96 * 1048576 && ipOf(limEdited) === '172.31.250.11'
+				&& limEdited.HostConfig.NanoCpus === 5e8 && limEdited.HostConfig.Devices?.[0]?.PathOnHost === '/dev/full' && limEdited.Config.Hostname === 'flow-host',
+			'编辑后重建：改动的内存上限与地址生效，其余限制保留', { text: le.text, mem: limEdited.HostConfig.Memory, ip: ipOf(limEdited) });
+			await dismissTask();
+		}
+		DIND(`docker rm -f ${LIM} >/dev/null`);
+		await refresh();
+		await tab('Networks and volumes');
+		await waitFor(`!!document.querySelector('tr[data-network="${NET}"]')`, '回到网络列表');
 		await page.evaluate(`document.querySelector('[data-action=volume-new]').click()`);
 		await waitFor(`!!document.querySelector('[data-volume-form]')`, '新建卷表单');
 		await fill({ 'volume-name': VOL });
@@ -570,6 +750,30 @@ try {
 			await dismissTask();
 		}
 
+		section('存储空间');
+		DIND(`docker create --name ${STOPPED} busybox:stable true >/dev/null`);
+		await refresh();
+		await tab('Storage');
+		await waitFor(`!!document.querySelector('[data-storage-row="containers"]')`, '存储空间');
+		const rows = await page.evaluate(`Object.fromEntries([...document.querySelectorAll('[data-storage-row]')].map(r => [r.dataset.storageRow, r.textContent]))`);
+		check(/\d+(\.\d+)? [KMG]?B/.test(rows.images) && /stopped containers/.test(rows.containers) && 'volumes' in rows, '列出镜像、容器与卷的占用与可清理量', rows);
+		await screenshot('docker-storage');
+		await page.evaluate(`document.querySelector('[data-clean=containers]').click()`);
+		await waitFor(`!!document.querySelector('dialog[role=alertdialog][open] [data-clean-containers]')`, '清理确认');
+		const toDelete = await page.evaluate(`[...document.querySelectorAll('[data-clean-containers] li')].map(l => l.textContent.trim())`);
+		check(toDelete.includes(STOPPED) && toDelete.includes('sight-job') && !toDelete.includes('sight-web'), '确认框列出要删除的已停止容器，不含运行中的', toDelete);
+		const stoppedNow = DIND(`docker ps -a --filter status=exited --filter status=created --format '{{.Names}}'`).trim().split('\n').filter(Boolean);
+		if (stoppedNow.every(n => [STOPPED, 'sight-job'].includes(n))) {
+			await confirmDialog('Delete');
+			await waitFor(`/Deleted 2 stopped containers/.test(${main})`, '删除已停止的容器', 30000);
+			check(!exists(STOPPED) && !exists('sight-job') && containerRunning('sight-web') && DIND('docker volume ls -q').includes(flowVolumes[0] || ''), '删除已停止的容器，运行中的与卷保留');
+		} else {
+			await clickText('dialog[role=alertdialog][open] .actions button', 'Cancel');
+			DIND(`docker rm ${STOPPED} >/dev/null`);
+			check(true, '设备上还有别的已停止容器，跳过删除验收', stoppedNow);
+		}
+		restoreJob();
+
 		section('设置');
 		await tab('Settings');
 		await waitFor(`!!document.querySelector('[data-docker-settings]')`, '设置表单');
@@ -644,6 +848,9 @@ try {
 		await tab('Compose');
 		narrow &&= await fits();
 		await screenshot('docker-compose-narrow');
+		await tab('Storage');
+		narrow &&= await fits();
+		await screenshot('docker-storage-narrow');
 		check(narrow, '窄屏无横向滚动');
 		await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false }, page.sessionId);
 
@@ -674,11 +881,14 @@ try {
 	if (diskLoop) sh(`umount ${DISK_MNT}; losetup -d ${diskLoop}; rm -f ${DISK_IMG}; rmdir ${DISK_MNT}; true`);
 	if (dockerReady) {
 		/* 无论成败都恢复：删除流程容器、项目、网络、卷与下载的镜像，恢复重启策略、证书与 dockerd 设置 */
-		const cleanup = [`docker rm -f ${NEW} ${UPD} ${UPD}-sight-old >/dev/null 2>&1; true`, `docker update --restart=${original.policy} sight-web >/dev/null`,
+		const cleanup = [`docker rm -f ${NEW} ${UPD} ${UPD}-sight-old ${LIM} ${UPD2} ${UPD2}-sight-old ${BAD} ${BAD}-sight-old ${STOPPED} >/dev/null 2>&1; true`, `docker rmi ${BAD_REF} >/dev/null 2>&1; true`,
+			`docker update --restart=${original.policy} sight-web >/dev/null`,
 			original.hadPull ? 'true' : `docker rmi ${PULL} >/dev/null 2>&1; true`, `docker network rm ${NET} >/dev/null 2>&1; true`,
 			`docker volume rm ${[VOL, PRUNE_VOL, `${PROJECT}_data`, ...flowVolumes].filter(Boolean).join(' ')} >/dev/null 2>&1; true`];
 		if (LOCAL) cleanup.push(original.hadLatest ? 'true' : 'docker rmi busybox:latest >/dev/null 2>&1; true', original.hadMusl ? 'true' : 'docker rmi busybox:musl >/dev/null 2>&1; true');
 		for (const cmd of cleanup) try { DIND(cmd); } catch { /* 忽略 */ }
+		try { restoreJob(); } catch { /* 忽略 */ }
+		try { if (original.updates) shIn(`cat > ${UPDATES}`, original.updates); else sh(`rm -f ${UPDATES}`); } catch { /* 忽略 */ }
 		try {
 			if (LOCAL) sh(`for p in ${PROJECT} ${EXT}; do docker-compose -p $p down -v >/dev/null 2>&1; done; rm -rf /etc/sight-docker/compose/${PROJECT} /root/${EXT}; for p in $(pidof ttyd); do grep -q /usr/bin/docker /proc/$p/cmdline && kill $p; done; true`);
 			if (certAdded) sh('rm -f "$(uci -q get uhttpd.main.cert || echo /etc/uhttpd.crt)" "$(uci -q get uhttpd.main.key || echo /etc/uhttpd.key)"');

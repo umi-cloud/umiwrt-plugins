@@ -2,11 +2,11 @@
  * Docker（插件自带的 rpcd 后端）：sight.docker / sight.docker.container / sight.docker.image / sight.docker.network 移植自 dockerman 的 docker.*，
  * 把 Docker API 的 HTTP 响应包成 { code, headers, body }：code ≥ 300 视为失败，body.message 为原因；守护进程连不上时 code 为 500。
  * sight.docker 是本插件加的：logs 在设备端解开日志的多路复用流后返回纯文本（dockerd 在其它主机时同样可读）；
- * 拉取镜像、重建容器（更新镜像 / 修改配置）与 Compose 项目操作交给设备端后台任务（*_start，同一时间一个，
- * task_status 查询步骤与输出），浏览器关掉也会做完；terminal_* 管理一次性的 ttyd 终端会话。
+ * 拉取镜像、重建容器（更新镜像 / 修改配置 / 批量更新）、检查更新与 Compose 项目操作交给设备端后台任务（*_start，同一时间一个，
+ * task_status 查询步骤与输出），浏览器关掉也会做完；usage 一次取全部运行中容器的资源采样；terminal_* 管理一次性的 ttyd 终端会话。
  * 启停、删除、新建、重启策略、网络与卷均为即时操作，操作后回读列表；dockerd 的 uci 设置走会话暂存 + 保存即生效。
  */
-import { probe, isCidr, isIPv4, isIPv6 } from '@sight/sdk/lib';
+import { probe, isCidr, isIPv4, isIPv6, isHostname } from '@sight/sdk/lib';
 import { recreateBody, formFromInspect, buildEdit } from './recreate.js';
 
 /* 启动项操作走宿主自带的 sight 对象（sight-ui ≥ 0.4.0，包依赖已约束） */
@@ -16,7 +16,7 @@ export const ACTIONS = ['start', 'stop', 'restart'];
 export const RESTART_POLICIES = ['unless-stopped', 'always', 'on-failure', 'no'];
 /* dockerd 未设置 data_root 时 init 脚本的缺省值 */
 export const DEFAULT_DATA_ROOT = '/opt/docker/';
-const LOG_LINES = 200;
+export const LOG_LINES = [200, 1000, 5000];
 
 export class DockerError extends Error {
 	constructor(message, code) { super(message); this.code = code; }
@@ -45,7 +45,7 @@ export const PROJECT_LABEL = 'com.docker.compose.project';
 /** 纯函数：列表数据整形；镜像的使用数按容器的 ImageID 统计（list 接口的 Containers 字段常为 -1） */
 export function shape(containers, images) {
 	const list = (containers || []).map(c => ({
-		id: c.Id, name: (c.Names?.[0] || c.Id.slice(0, 12)).replace(/^\//, ''), image: c.Image, imageId: c.ImageID,
+		id: c.Id, name: (c.Names?.[0] || c.Id.slice(0, 12)).replace(/^\//, ''), image: c.Image, imageId: c.ImageID, ref: imageRefOf(c.Image),
 		state: c.State, status: c.Status, ports: formatPorts(c.Ports), publish: c.Ports || [], created: c.Created, command: c.Command || '',
 		project: c.Labels?.[PROJECT_LABEL] || '', service: c.Labels?.['com.docker.compose.service'] || '',
 		workingDir: c.Labels?.['com.docker.compose.project.working_dir'] || '',
@@ -55,6 +55,7 @@ export function shape(containers, images) {
 	for (const c of list) used[c.imageId] = (used[c.imageId] || 0) + 1;
 	const imgs = (images || []).map(i => ({
 		id: i.Id, tags: (i.RepoTags || []).filter(tag => tag !== '<none>:<none>'), size: i.Size, created: i.Created, containers: used[i.Id] || 0,
+		digests: (i.RepoDigests || []).map(d => d.slice(d.indexOf('@') + 1)).filter(d => d.startsWith('sha256:')),
 	})).sort((a, b) => b.created - a.created);
 	return { containers: list, images: imgs };
 }
@@ -146,6 +147,68 @@ export function volumesOf(volumes, df, containers) {
 	})).sort((a, b) => (a.anonymous ? 1 : 0) - (b.anonymous ? 1 : 0) || a.name.localeCompare(b.name));
 }
 
+/**
+ * 纯函数：system/df + 整形后的列表 → 存储空间各项 { size, reclaimable, count }，size 取不到为 null。
+ * 镜像的可清理量为没有容器使用的镜像大小之和（共享的层可能重复计入，只作估计）；
+ * 容器为可写层大小，可清理的是已停止的容器；卷为没有容器使用的。
+ */
+export function storageOf(df, images, containers, volumes) {
+	const unusedImages = (images || []).filter(i => !i.containers);
+	const rw = {};
+	for (const c of df?.Containers || []) if (c.SizeRw >= 0) rw[c.Id] = c.SizeRw;
+	const stopped = (containers || []).filter(c => c.state !== 'running' && c.state !== 'restarting' && c.state !== 'paused');
+	const vols = Array.isArray(volumes) ? volumes : [];
+	const unusedVolumes = vols.filter(v => !v.containers.length);
+	const sum = list => list.reduce((n, x) => n + (x ?? 0), 0);
+	return {
+		images: { size: df?.LayersSize ?? null, reclaimable: sum(unusedImages.map(i => i.size)), count: unusedImages.length },
+		containers: { size: df?.Containers ? sum(Object.values(rw)) : null, reclaimable: sum(stopped.map(c => rw[c.id])), count: stopped.length, items: stopped },
+		volumes: { size: vols.some(v => v.size != null) ? sum(vols.map(v => v.size)) : null, reclaimable: sum(unusedVolumes.map(v => v.size)), count: unusedVolumes.length },
+	};
+}
+
+/* ---- 日志 ---- */
+
+const TS_RE = /^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d{1,9}))?Z\s?/;
+/**
+ * 纯函数：带时间戳的日志文本 → [{ ts, time, text }]。ts 为可比较的定长字符串（纳秒补齐），time 为毫秒；
+ * 没有时间戳的行（截断处等）ts 为 ''。末尾的空行去掉。
+ */
+export function parseLogs(text) {
+	const lines = String(text || '').split('\n');
+	if (lines.length && lines[lines.length - 1] === '') lines.pop();
+	return lines.map(line => {
+		const m = TS_RE.exec(line);
+		if (!m) return { ts: '', time: null, text: line };
+		const frac = (m[2] || '').padEnd(9, '0');
+		return { ts: `${m[1]}.${frac}`, time: Date.parse(`${m[1]}Z`) + Math.floor(+frac / 1e6), text: line.slice(m[0].length) };
+	});
+}
+
+/** 纯函数：最后一条记录 → logs 的 since 参数（UNIX 秒.纳秒）；没有时间戳为 '' */
+export function sinceOf(lines) {
+	for (let i = (lines || []).length - 1; i >= 0; i--) {
+		const ts = lines[i].ts;
+		if (ts) return `${Math.floor(Date.parse(`${ts.slice(0, 19)}Z`) / 1000)}.${ts.slice(20)}`;
+	}
+	return '';
+}
+
+/** 纯函数：跟随时追加增量记录：since 会包含时间相同的记录，只追加比已有最后一条更晚的；超出 limit 行时去掉最早的 */
+export function appendLogs(lines, more, limit) {
+	let last = '';
+	for (let i = lines.length - 1; i >= 0 && !last; i--) last = lines[i].ts;
+	const fresh = last ? more.filter(l => l.ts > last) : more;
+	const all = fresh.length ? [...lines, ...fresh] : lines;
+	return all.length > limit ? all.slice(all.length - limit) : all;
+}
+
+/** 纯函数：按关键字过滤（不区分大小写）；不显示时间时只匹配正文 */
+export function filterLogs(lines, query, withTime, formatTime) {
+	const q = String(query || '').trim().toLowerCase();
+	return q ? lines.filter(l => (withTime && l.time != null ? `${formatTime(l.time)} ${l.text}` : l.text).toLowerCase().includes(q)) : lines;
+}
+
 /** 纯函数：新建网络校验 → [{ message, field }] */
 export function validateNetwork(form, names = []) {
 	const errors = [];
@@ -208,17 +271,42 @@ const filled = row => String(row.host ?? '').trim() !== '' || String(row.contain
 
 /** 新建容器表单的初值 */
 export function emptyCreate() {
-	return { source: 'local', image: '', pullRef: '', name: '', ports: [], mounts: [], env: [], restart: 'unless-stopped', network: 'bridge', command: '', privileged: false, start: true };
+	return { source: 'local', image: '', pullRef: '', name: '', ports: [], mounts: [], env: [], restart: 'unless-stopped', network: 'bridge', ip: '', command: '', privileged: false,
+		hostname: '', memory: '', cpus: '', devices: [], start: true };
 }
 
 /** 纯函数：表单选择的镜像引用 */
 export const createImage = form => form.source === 'pull' ? normalizeImage(form.pullRef) : form.image;
 
+/* 设备直通：设备路径[:容器内路径]，都在 /dev 下 */
+const DEVICE_RE = /^\/dev\/[^\s:]+(:\/dev\/[^\s:]+)?$/;
+/** 纯函数：设备直通的一项 → HostConfig.Devices 的一项 */
+export function parseDevice(text) {
+	const [host, inner] = String(text).trim().split(':');
+	return { PathOnHost: host, PathInContainer: inner || host, CgroupPermissions: 'rwm' };
+}
+/** 纯函数：HostConfig.Devices 的一项 → 表单写法 */
+export const deviceText = d => d.PathInContainer && d.PathInContainer !== d.PathOnHost ? `${d.PathOnHost}:${d.PathInContainer}` : d.PathOnHost;
+/* 主机名与固定地址只在容器有自己的网络时可设 */
+export const ownNetwork = network => !/^(host|none|container:)/.test(network || '');
+
+/** 纯函数：IPv4 地址是否在 IPv4 子网内 */
+export function inSubnet(ip, cidr) {
+	const [net, len] = String(cidr).split('/');
+	if (!isIPv4(ip) || !isIPv4(net) || !(+len >= 0 && +len <= 32)) return false;
+	const n = a => a.split('.').reduce((v, x) => v * 256 + +x, 0);
+	const mask = +len === 0 ? 0 : (0xffffffff << (32 - len)) >>> 0;
+	return ((n(ip) & mask) >>> 0) === ((n(net) & mask) >>> 0);
+}
+
+/* 内存上限的最小值（MB，Docker 不接受更小的） */
+const MIN_MEMORY = 6;
 /**
  * 纯函数：校验新建容器表单。
+ * subnets：所选自定义网络的 IPv4 子网（固定地址须在其中）；cpus：设备 CPU 核数（CPU 上限不超过它）
  * @returns {{ message: string, field: string }[]} field 为出错控件的 id 后缀
  */
-export function validateCreate(form, names = []) {
+export function validateCreate(form, names = [], { subnets = [], cpus = null } = {}) {
 	const errors = [];
 	const image = createImage(form);
 	if (!image) errors.push({ message: form.source === 'pull' ? 'Enter the image to download, for example nginx:latest' : 'Choose an image', field: 'image' });
@@ -241,8 +329,33 @@ export function validateCreate(form, names = []) {
 	if (form.mounts.filter(filled).some(m => !PATH_RE.test(m.host.trim()) || !PATH_RE.test(m.container.trim())))
 		errors.push({ message: 'Folder paths must start with / and cannot contain a colon', field: 'mounts' });
 	if (form.env.some(e => !ENV_RE.test(e))) errors.push({ message: 'Environment variables look like NAME=value', field: 'env' });
+	const ip = String(form.ip || '').trim();
+	if (ip && isCustomNetwork(form.network)) {
+		if (!isIPv4(ip)) errors.push({ message: 'Enter a valid IPv4 address', field: 'ip' });
+		else if (subnets.length && !subnets.some(s => inSubnet(ip, s))) errors.push({ message: 'The address must be in the network’s subnet %s', args: [subnets.join(', ')], field: 'ip' });
+	}
+	const hostname = String(form.hostname || '').trim();
+	if (hostname && ownNetwork(form.network) && !isHostname(hostname)) errors.push({ message: 'Hostnames use letters, digits and dashes, separated by dots', field: 'hostname' });
+	const memory = String(form.memory ?? '').trim();
+	if (memory && !(/^\d+$/.test(memory) && +memory >= MIN_MEMORY)) errors.push({ message: 'Enter the memory limit in MB, at least %d', args: [MIN_MEMORY], field: 'memory' });
+	const cpu = String(form.cpus ?? '').trim();
+	if (cpu && !(/^\d+(\.\d{1,2})?$/.test(cpu) && +cpu > 0 && (!cpus || +cpu <= cpus))) errors.push(cpus ? { message: 'Enter a number of CPU cores from 0.01 to %d', args: [cpus], field: 'cpus' } : { message: 'Enter a number of CPU cores, for example 1.5', field: 'cpus' });
+	if ((form.devices || []).some(d => !DEVICE_RE.test(String(d).trim()))) errors.push({ message: 'Devices are paths under /dev, for example /dev/dri or /dev/ttyUSB0:/dev/ttyACM0', field: 'devices' });
 	if (splitCommand(form.command) === null) errors.push({ message: 'The command has an unmatched quote', field: 'command' });
 	return errors;
+}
+
+/* 自定义网络（不是内置的 bridge/host/none，也不共用其他容器的网络）才能指定固定地址 */
+export const isCustomNetwork = network => !!network && !BUILTIN_NETWORKS.includes(network) && !network.startsWith('container:');
+
+/** 纯函数：资源限制、主机名、设备的表单值 → 写入 create 参数（host 为 HostConfig）；空值即不限制 */
+export function applyLimits(body, host, form) {
+	const memory = String(form.memory ?? '').trim(), cpus = String(form.cpus ?? '').trim();
+	host.Memory = memory ? +memory * 1048576 : 0;
+	host.NanoCpus = cpus ? Math.round(+cpus * 1e9) : 0;
+	host.Devices = (form.devices || []).map(d => String(d).trim()).filter(Boolean).map(parseDevice);
+	const hostname = String(form.hostname || '').trim();
+	if (hostname && ownNetwork(form.network)) body.Hostname = hostname; else delete body.Hostname;
 }
 
 /** 纯函数：表单（已校验）→ docker.container.create 的参数；空行忽略，host 网络不发布端口 */
@@ -265,6 +378,12 @@ export function buildCreate(form) {
 	const mounts = form.mounts.filter(filled);
 	if (mounts.length) host.Binds = mounts.map(m => `${m.host.trim()}:${m.container.trim()}${m.readonly ? ':ro' : ''}`);
 	if (form.privileged) host.Privileged = true;
+	applyLimits(body, host, form);
+	if (!host.Memory) delete host.Memory;
+	if (!host.NanoCpus) delete host.NanoCpus;
+	if (!host.Devices.length) delete host.Devices;
+	const ip = String(form.ip || '').trim();
+	if (ip && isCustomNetwork(form.network)) body.NetworkingConfig = { EndpointsConfig: { [form.network]: { IPAMConfig: { IPv4Address: ip } } } };
 	const name = form.name.trim();
 	return { query: name ? { name } : {}, body };
 }
@@ -300,6 +419,51 @@ export function detailOf(inspect) {
 
 /** 纯函数：容器能否「更新到新版镜像」：须由带标签的镜像引用创建（不是镜像 ID 或摘要） */
 export const canUpdate = ref => isImageRef(ref) && !ref.includes('@') && !/^sha256:/.test(ref);
+
+/* 列表接口在容器所用的标签已移到别的镜像时给出镜像 ID（sha256:… 或十六进制） */
+const IMAGE_ID_RE = /^(sha256:)?[a-f0-9]{12,64}$/;
+/** 纯函数：镜像引用 → 与本机标签一致的写法（补 :latest，去掉 Docker Hub 的 docker.io/ 与 library/ 前缀）；镜像 ID 或摘要返回 '' */
+export function imageRefOf(image) {
+	const s = normalizeImage(image);
+	if (!s || IMAGE_ID_RE.test(String(image).trim()) || !canUpdate(s)) return '';
+	return s.replace(/^(docker\.io|index\.docker\.io)\//, '').replace(/^library\/(?=[^/]+$)/, '');
+}
+
+/**
+ * 纯函数：容器是否有新版镜像 → 'available' | 'latest' | 'unknown' | 'none'。
+ * 本机标签已指向别的镜像即有新版（无需联网）；否则用最近一次检查得到的仓库摘要与容器所用镜像的摘要比对。
+ * checks：check_list 的结果 { 引用: { digest } | { error } }
+ */
+export function updateState(c, images, checks) {
+	if (!c.ref) return 'none';
+	const tagged = (images || []).find(i => i.tags.includes(c.ref));
+	if (tagged && tagged.id !== c.imageId) return 'available';
+	const digest = checks?.[c.ref]?.digest;
+	const mine = (images || []).find(i => i.id === c.imageId);
+	if (!digest || !mine?.digests?.length) return 'unknown';
+	return mine.digests.includes(digest) ? 'latest' : 'available';
+}
+
+/** 纯函数：usage 返回的容器状态与当前列表不一致（有增减或启停）时为 true */
+export function statesChanged(states, containers) {
+	const ids = Object.keys(states || {});
+	return ids.length !== (containers || []).length || (containers || []).some(c => states[c.id] !== c.state);
+}
+
+/** 纯函数：容器是否符合搜索（名称、镜像、端口、Compose 项目，不区分大小写） */
+export function matchContainer(c, query) {
+	const q = String(query || '').trim().toLowerCase();
+	return !q || [c.name, c.image, c.ref, c.project, ...c.ports].some(v => String(v || '').toLowerCase().includes(q));
+}
+
+/** 纯函数：要检查的镜像引用（去重、排序） */
+export const checkRefs = containers => [...new Set((containers || []).map(c => c.ref).filter(Boolean))].sort();
+
+/** 纯函数：最近一次检查的时间（各镜像中最早的）；从未检查为 null */
+export function lastChecked(containers, checks) {
+	const times = checkRefs(containers).map(r => checks?.[r]?.checked).filter(Boolean);
+	return times.length ? Math.min(...times) : null;
+}
 
 /* 设备端返回的错误码 → 说明（英文 msgid） */
 const ERRORS = {
@@ -408,17 +572,22 @@ export function createDocker(client, uci) {
 		if (e) throw e;
 		return r || {};
 	};
+	/* 列表接口给出镜像 ID 的容器（所用标签已移到新镜像）：从 inspect 取创建时的镜像引用 */
+	const resolveRefs = containers => Promise.all(containers.filter(c => !c.ref && IMAGE_ID_RE.test(c.image)).map(async c => {
+		const r = await call('sight.docker.container', 'inspect', { id: c.id, query: {} }).catch(() => null);
+		c.ref = imageRefOf(r?.Config?.Image);
+	}));
 	return {
 		/**
-		 * @returns {Promise<null | { reachable: false, error: string } | { reachable: true, info, containers, images, disk, networks, volumes, compose }>}
-		 * null = 后端对象不存在（插件不完整）；网络、卷、Compose 读取失败时对应字段为 { error }
+		 * @returns {Promise<null | { reachable: false, error: string } | { reachable: true, info, containers, images, disk, storage, checks, networks, volumes, compose }>}
+		 * null = 后端对象不存在（插件不完整）；网络、卷、Compose 读取失败时对应字段为 { error }；checks 为最近一次检查更新的结果
 		 */
 		async load() {
 			const version = await probe(client, 'sight.docker', 'version');
 			if (!version) return null;
 			if (version.code >= 300) return { reachable: false, error: version.body?.message || '' };
 			const soft = p => p.catch(e => ({ error: e?.message || String(e) }));
-			const [info, containers, images, df, networks, volumes, compose] = await Promise.all([
+			const [info, containers, images, df, networks, volumes, compose, checks] = await Promise.all([
 				call('sight.docker', 'info'),
 				call('sight.docker.container', 'list', { query: { all: true } }),
 				call('sight.docker.image', 'list', {}),
@@ -426,15 +595,20 @@ export function createDocker(client, uci) {
 				soft(call('sight.docker.network', 'list', { query: {} })),
 				soft(call('sight.docker.volume', 'list', { query: {} })),
 				soft(sight('compose_list')),
+				sight('check_list').then(r => r.images || {}).catch(() => ({})),
 			]);
 			const shaped = shape(containers, images);
+			await resolveRefs(shaped.containers);
+			const vols = volumes.error ? volumes : volumesOf(volumes, df, shaped.containers);
 			return {
 				reachable: true,
 				info: { version: info.ServerVersion || version.body?.Version || '', running: info.ContainersRunning ?? 0, total: info.Containers ?? 0, cpus: info.NCPU ?? null, memory: info.MemTotal ?? null, root: info.DockerRootDir || '', mirrors: info.RegistryConfig?.Mirrors || [] },
 				disk: df?.LayersSize ?? null,
+				storage: storageOf(df, shaped.images, shaped.containers, vols),
+				checks,
 				...shaped,
 				networks: networks.error ? networks : networksOf(networks, shaped.containers),
-				volumes: volumes.error ? volumes : volumesOf(volumes, df, shaped.containers),
+				volumes: vols,
 				compose: compose.error ? compose : { available: compose.available, projects: projectsOf(compose.projects, shaped.containers) },
 			};
 		},
@@ -453,6 +627,8 @@ export function createDocker(client, uci) {
 		},
 		/* 一次即时采样（one-shot：rpcd 在进程内同步调用，不让它等 Docker 隔一秒的两次采样）；CPU 占用由页面前后两次采样相减 */
 		async stats(id) { return call('sight.docker.container', 'stats', { id, query: { stream: false, 'one-shot': true } }); },
+		/** @returns {Promise<{ states: Record<string, string>, samples: Record<string, object> }>} 全部容器的状态与运行中容器的采样（结构同 stats，只含计算所需字段） */
+		async usage() { return call('sight.docker', 'usage'); },
 		async removeImage(id) { await call('sight.docker.image', 'remove', { id, query: {} }); },
 		/** 删除所有没有容器使用的镜像（含有标签的），返回释放的字节数 */
 		async pruneImages() {
@@ -469,9 +645,9 @@ export function createDocker(client, uci) {
 			}
 			return r.Id;
 		},
-		/** @returns {Promise<{ ok: boolean, text: string }>} Docker 报错时 ok 为 false、text 为原因 */
-		async logs(id) {
-			try { return { ok: true, text: unwrap(await client.call('sight.docker', 'logs', { id, tail: LOG_LINES }))?.text || '' }; }
+		/** @returns {Promise<{ ok: boolean, text: string }>} Docker 报错时 ok 为 false、text 为原因；since 只取此后的记录 */
+		async logs(id, { tail = LOG_LINES[0], since = '' } = {}) {
+			try { return { ok: true, text: unwrap(await client.call('sight.docker', 'logs', { id, tail, ...(since ? { since } : {}) }))?.text || '' }; }
 			catch (e) { if (e instanceof DockerError) return { ok: false, text: e.message }; throw e; }
 		},
 
@@ -499,6 +675,14 @@ export function createDocker(client, uci) {
 			const { inspect, base } = await this.recreateBase(id);
 			if (!canUpdate(inspect.Config?.Image)) throw new Error('This container was created from an image ID, so there is no newer version to look for');
 			return (await sight('recreate_start', { id, mode: 'update', name: '', body: base.body })).task;
+		},
+		/** 检查这些镜像在仓库里是否有新版（不下载） */
+		async checkStart(images) { return (await sight('check_start', { images })).task; },
+		/** 批量更新：逐个拉取，有新版才重建 */
+		async updateAll(ids) {
+			const items = [];
+			for (const id of ids) items.push({ id, body: (await this.recreateBase(id)).base.body });
+			return (await sight('update_start', { items })).task;
 		},
 		/** 用编辑后的表单重建（不拉取，镜像不在本机时设备端先下载） */
 		async edit(id, base, form) {
@@ -534,6 +718,11 @@ export function createDocker(client, uci) {
 		async terminalStop(id) { return !!(await sight('terminal_stop', { id })).stopped; },
 
 		async loadSettings() { return settingsOf(await uci.load('dockerd')); },
+		/** 路由器时区（如 Asia/Shanghai），新建容器时可一键加为 TZ；读不到为 '' */
+		async timezone() {
+			const sys = await uci.load('system').catch(() => null);
+			return Object.values(sys || {}).find(s => s['.type'] === 'system')?.zonename || '';
+		},
 		/** 宿主的存储信息（sight-ui 0.6.0 起有 sight.storage）；没有时返回 null，页面不显示数据盘建议 */
 		async loadDisks() {
 			const r = await probe(client, 'sight.storage', 'list').catch(() => null);
