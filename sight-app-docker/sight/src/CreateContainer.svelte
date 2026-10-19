@@ -3,6 +3,7 @@
 	import { t, errorText, useEditor, Button, Checkbox, Disclosure, DynamicList, ErrorSummary, Field, FormActions, FormSection, Icon, Input, RadioGroup, Select } from '@sight/sdk';
 	import { emptyCreate, validateCreate, createImage, pullPercent, isCustomNetwork, ownNetwork, RESTART_POLICIES } from './service.js';
 	import { policyLabel } from './format.js';
+	import ImageSearch from './ImageSearch.svelte';
 
 	/* 新建容器（抽屉正文）：选镜像（本机已有，或填写后先下载）→ 名称 → 网络（自定义网络可设固定地址）与端口 → 目录 → 环境变量 → 重启策略；
 	   主机名、内存与 CPU 上限、设备直通、命令与特权模式收进「高级」。镜像不在本机时先经页面的后台拉取任务下载，完成后再创建。
@@ -100,6 +101,7 @@
 					</Select>
 				</Field>
 			{:else}
+				<ImageSearch {svc} selected={createImage(form)} disabled={busy} onpick={ref => form.pullRef = ref} />
 				<Field id="create-image" label={t('Image to download')} help={t('From Docker Hub unless a registry is given, for example ghcr.io/owner/app:tag. Downloading can take several minutes.')} error={fieldError('create-image')}>
 					<Input id="create-image" name="createPull" bind:value={form.pullRef} disabled={busy} placeholder="nginx:latest" spellcheck="false" autocomplete="off"
 						aria-invalid={!!fieldError('create-image')} aria-describedby={fieldError('create-image') ? 'create-image-help create-image-error' : 'create-image-help'} />

@@ -206,6 +206,14 @@ function call_docker(method, path, options) {
 	sock.send(join('\r\n', req_headers));
 	if (payload) sock.send(payload);
 
+	/* options.timeout（毫秒）：等首个响应的上限，用于要连外网的请求（如搜索），不让 rpcd 长时间卡住 */
+	if (options.timeout) {
+		const ready = socket.poll(options.timeout, [sock, socket.POLLIN]);
+		if (!ready || !length(ready) || !ready[0][1]) {
+			sock.close();
+			return { code: 504, headers: {}, body: { message: 'timeout' } };
+		}
+	}
 	const response_buff = sock.recv(BLOCKSIZE);
 	if (!response_buff || response_buff === '') {
 		sock.close();
@@ -422,6 +430,7 @@ const TASK_DIR = '/tmp/sight-docker';
 const TASK = TASK_DIR + '/task.json', TASK_LOG = TASK_DIR + '/task.log', TASK_LOCK = TASK_DIR + '/start.lock';
 const TASK_RUNNER = '/usr/libexec/sight-docker-task';
 const UPDATES = TASK_DIR + '/updates.json';
+const SEARCH_LIMIT = 25, SEARCH_TIMEOUT = 10000;
 const OUTPUT_LIMIT = 16384;
 /* 后台任务刚起、尚未写入 pid 时的宽限（秒） */
 const SPAWN_GRACE = 30;
@@ -593,6 +602,21 @@ function check_start(request) {
 		if (!(image in list)) push(list, image);
 	}
 	return start_task({ kind: 'check', images: list, steps: list });
+}
+
+/* 搜索 Docker Hub（经 dockerd，镜像加速不管搜索）：关键词只含字母数字与 . _ - / 空格；最多等 SEARCH_TIMEOUT */
+function image_search(request) {
+	const term = trim(request.args?.term ?? '');
+	if (type(term) != 'string' || !length(term) || length(term) > 100 || !match(term, /^[A-Za-z0-9][A-Za-z0-9._\/ -]*$/))
+		return { error: 'invalid' };
+	const r = call_docker('GET', '/images/search', { query: { term: term, limit: SEARCH_LIMIT }, timeout: SEARCH_TIMEOUT });
+	if (r.code == 504) return { error: 'timeout' };
+	if (r.code >= 300) return { error: r.body?.message || 'failed' };
+	const out = [];
+	for (let x in (type(r.body) == 'array' ? r.body : []))
+		if (type(x?.name) == 'string')
+			push(out, { name: x.name, description: x.description || '', stars: x.star_count || 0, official: !!x.is_official });
+	return { results: out };
 }
 
 /* 最近一次检查的结果：{ 镜像引用: { digest, checked } | { error, checked } } */
@@ -836,6 +860,7 @@ const sight_methods = {
 	recreate_start:  { args: { id: '', mode: '', name: '', body: {} }, call: recreate_start },
 	check_start:     { args: { images: [] }, call: check_start },
 	check_list:      { args: {}, call: check_list },
+	search:          { args: { term: '' }, call: image_search },
 	update_start:    { args: { items: [] }, call: update_start },
 	compose_list:    { args: {}, call: compose_list },
 	compose_read:    { args: { name: '' }, call: compose_read },

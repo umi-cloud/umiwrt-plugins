@@ -9,7 +9,7 @@
  *   4. 终端：一次性 ttyd 会话（页面启动/结束；监听地址、一次性路径、来源校验、单连接、无人连接超时、HTTPS）；
  *      经 websocket 在容器里执行命令（宿主需有 node:22-alpine 镜像，在设备容器的网络命名空间里运行探针）
  *   5. 新建容器（端口、只读目录、环境变量、命令）并启动，列表与详情的「打开」链接，再删除
- *   6. 下载镜像（后台任务）与清理未使用的镜像
+ *   6. 搜索 Docker Hub、选结果下载镜像（后台任务）与清理未使用的镜像
  *   7. 更新容器：有新版时用原配置重建（配置、标签、匿名卷数据保留），再次更新提示「已是最新」
  *   8. 编辑容器重建；端口冲突时重建失败并恢复原容器；批量更新（失败的跳过、其余照常更新）与检查更新（只查仓库摘要，不下载）
  *   9. 网络与卷的新建、删除，清理未使用的卷；在自定义网络上新建带固定地址、主机名、内存/CPU 上限、设备与时区的容器，编辑后重建
@@ -82,7 +82,7 @@ contract('sight.docker.volume', { list: { query: 'Table' }, create: { opts: 'Tab
 contract('sight.docker', {
 	logs: { id: 'String', tail: 'Integer', since: 'String' }, usage: {}, task_status: {}, pull_start: { image: 'String' },
 	recreate_start: { id: 'String', mode: 'String', name: 'String', body: 'Table' },
-	check_start: { images: 'Array' }, check_list: {}, update_start: { items: 'Array' },
+	check_start: { images: 'Array' }, check_list: {}, update_start: { items: 'Array' }, search: { term: 'String' },
 	compose_list: {}, compose_read: { name: 'String' }, compose_write: { name: 'String', content: 'String', create: 'Boolean' }, compose_start: { name: 'String', action: 'String', volumes: 'Boolean' },
 	terminal_start: { id: 'String', host: 'String', tls: 'Boolean' }, terminal_status: { id: 'String' }, terminal_stop: { id: 'String' },
 });
@@ -94,7 +94,7 @@ await withAclUser(['sight-ui'], async sid => {
 await withAclUser(['sight-ui', 'sight-plugin-docker'], async sid => {
 	for (const [o, m, p] of [['sight.docker', 'version', {}], ['sight.docker.container', 'list', { query: { all: true } }], ['sight.docker.image', 'list', {}], ['sight.docker.network', 'list', { query: {} }],
 		['sight.docker.volume', 'list', { query: {} }], ['sight.docker', 'task_status', {}], ['sight.docker', 'compose_list', {}], ['sight.docker', 'terminal_status', { id: 'sight-web' }],
-		['sight.docker', 'logs', { id: 'sight-job', tail: 5 }], ['sight.docker', 'usage', {}], ['sight.docker', 'check_list', {}], ['uci', 'get', { config: 'dockerd' }]])
+		['sight.docker', 'logs', { id: 'sight-job', tail: 5 }], ['sight.docker', 'usage', {}], ['sight.docker', 'check_list', {}], ['sight.docker', 'search', { term: 'x;y' }], ['uci', 'get', { config: 'dockerd' }]])
 		check((await ubus(sid, o, m, p))?.[0] === 0, `加上本包权限组后可调用 ${o}.${m}`);
 	/* 写操作用不存在的对象试探：放行时由 Docker 回 4xx，而不是被 ACL 拒绝 */
 	const missing = 'sight-flow-missing';
@@ -115,11 +115,12 @@ await withAclUser(['sight-ui', 'sight-plugin-docker'], async sid => {
 	const badDigest = await ubus(sid, 'sight.docker', 'check_start', { images: [`alpine@sha256:${'a'.repeat(64)}`] });
 	const badItems = await ubus(sid, 'sight.docker', 'update_start', { items: [{ id: '-x', body: {} }] });
 	const badSince = await ubus(sid, 'sight.docker', 'logs', { id: 'sight-job', tail: 5, since: '1; id' });
+	const badTerm = await ubus(sid, 'sight.docker', 'search', { term: '$(touch /tmp/sight-flow-pwned)' });
 	check(injected?.[1]?.error === 'invalid image' && badRecreate?.[1]?.error === 'invalid image' && badMode?.[1]?.error === 'invalid' && badProject?.[1]?.error === 'invalid'
 		&& badAction?.[1]?.error === 'invalid' && badHost?.[1]?.error === 'not_lan' && badId?.[1]?.error === 'invalid'
-		&& badCheck?.[1]?.error === 'invalid image' && badDigest?.[1]?.error === 'invalid image' && badItems?.[1]?.error === 'invalid' && badSince?.[1]?.code === 400
+		&& badCheck?.[1]?.error === 'invalid image' && badDigest?.[1]?.error === 'invalid image' && badItems?.[1]?.error === 'invalid' && badSince?.[1]?.code === 400 && badTerm?.[1]?.error === 'invalid'
 		&& sh('[ -e /tmp/sight-flow-pwned ] && echo yes || echo no').trim() === 'no', 'sight.docker 拒绝不合格的镜像引用（含检查更新）、模式、项目名、终端监听地址、容器 ID 与日志起始时间',
-	{ injected, badRecreate, badMode, badProject, badAction, badHost, badId, badCheck, badDigest, badItems, badSince });
+	{ injected, badRecreate, badMode, badProject, badAction, badHost, badId, badCheck, badDigest, badItems, badSince, badTerm });
 	const cli = await ubus(sid, 'file', 'exec', { command: '/usr/bin/docker', params: ['logs', '--tail', '200', '--timestamps', 'f'.repeat(64)] });
 	check(cli?.[0] === 6, '不放行 docker CLI', cli);
 	const rejected = [
@@ -271,18 +272,21 @@ try {
 		check(await page.evaluate(`${drawer}.querySelector('[data-log-lines]').value`) === '1000', '日志行数可选 200/1000/5000');
 		await page.evaluate(`${drawer}.querySelector('[data-log-follow]').click()`);
 		await sleep(500);
-		emit('flow-follow-2');
-		await waitFor(`/flow-follow-2/.test(${logView})`, '跟随：新记录自动出现', 15000);
-		emit('flow-follow-3');
-		await waitFor(`/flow-follow-3/.test(${logView})`, '跟随：继续追加', 15000);
-		check(await page.evaluate(`${logView}.split('\\n').filter(l => /flow-follow-2/.test(l)).length === 1`), '跟随时只追加新记录，不重复');
+		/* 标记带本轮时间：容器日志会留下前几轮写入的记录 */
+		const mark = `flow-follow-${Date.now()}`;
+		emit(`${mark}-a`);
+		await waitFor(`${logView}.includes('${mark}-a')`, '跟随：新记录自动出现', 15000);
+		emit(`${mark}-b`);
+		await waitFor(`${logView}.includes('${mark}-b')`, '跟随：继续追加', 15000);
+		await sleep(3500);
+		check(await page.evaluate(`${logView}.split('\\n').filter(l => l.includes('${mark}-a')).length === 1`), '跟随时只追加新记录，不重复');
 		await page.evaluate(`${drawer}.querySelector('[data-log-follow]').click()`);
 		/* 下载：截住生成的文件 */
 		await page.evaluate(`(() => { window.__flowBlob = null; const create = URL.createObjectURL; URL.createObjectURL = b => { window.__flowBlob = b; return create.call(URL, b); };
 			const click = HTMLAnchorElement.prototype.click; HTMLAnchorElement.prototype.click = function () { if (this.download) { window.__flowName = this.download; return; } return click.call(this); }; })()`);
 		await page.evaluate(`${drawer}.querySelector('[data-log-download]').click()`);
 		const dl = await page.evaluate(`(async () => ({ name: window.__flowName, text: await window.__flowBlob?.text() }))()`);
-		check(/^sight-web-.+\.log$/.test(dl.name || '') && /flow-follow-3/.test(dl.text || ''), '下载当前显示的日志', dl.name);
+		check(/^sight-web-.+\.log$/.test(dl.name || '') && (dl.text || '').includes(`${mark}-b`), '下载当前显示的日志', dl.name);
 		await screenshot('docker-logs');
 		const target = original.policy === 'always' ? 'on-failure' : 'always';
 		for (const [policy, label] of [[target, `重启策略写入容器（${target}）`], [original.policy, '重启策略经界面恢复']]) {
@@ -420,8 +424,22 @@ try {
 		await page.evaluate(`document.querySelector('[data-pull-form]').requestSubmit()`);
 		await waitFor(`!!document.querySelector('[data-pull-form] .error-summary')`, '引用校验');
 		check(true, '不合格的镜像引用在表单内说明，不发起下载');
+		/* 搜索 Docker Hub：回车搜索不提交表单，点结果填入「名称:latest」；连不上外网时如实说明 */
+		await fill({ 'pull-image': '' });
+		await setAll('[data-pull-form] [data-search-term]', ['hello-world']);
+		await page.evaluate(`document.querySelector('[data-pull-form] [data-search-term]').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))`);
+		await waitFor(`!!document.querySelector('[data-pull-form] [data-result]') || !!document.querySelector('[data-image-search] .feedback[data-tone=error]')`, 'Docker Hub 搜索', 20000);
+		const found = await page.evaluate(`[...document.querySelectorAll('[data-pull-form] [data-result]')].map(b => ({ name: b.dataset.result, official: /Official/.test(b.textContent) }))`);
+		if (found.length) {
+			check(found[0].name === 'hello-world' && found[0].official && await page.evaluate(`!!document.querySelector('[data-pull-form]')`), '搜索 Docker Hub：回车即搜、不提交表单，官方镜像排在最前', found.slice(0, 3));
+			await page.evaluate(`document.querySelector('[data-pull-form] [data-result="hello-world"]').click()`);
+			check(await page.evaluate(`document.getElementById('pull-image').value`) === 'hello-world:latest', '点搜索结果填入镜像名（name:latest），可再改标签');
+		} else {
+			check(true, '容器连不上 Docker Hub：搜索如实说明，可直接填写镜像名', await page.evaluate(`document.querySelector('[data-image-search]').textContent`));
+			await fill({ 'pull-image': 'hello-world' });
+		}
+		await screenshot('docker-search');
 		let since = now();
-		await fill({ 'pull-image': 'hello-world' });
 		await page.evaluate(`document.querySelector('[data-pull-form]').requestSubmit()`);
 		await waitFor(`!document.querySelector('[data-pull-form]')`, '开始下载');
 		await screenshot('docker-pull');

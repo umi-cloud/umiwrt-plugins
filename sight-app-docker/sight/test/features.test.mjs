@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createDocker, shape, imageRefOf, updateState, checkRefs, lastChecked, statesChanged, storageOf, parseLogs, sinceOf, appendLogs, filterLogs,
-	emptyCreate, validateCreate, buildCreate, inSubnet, parseDevice, deviceText } from '../src/service.js';
+	emptyCreate, validateCreate, buildCreate, inSubnet, parseDevice, deviceText, isSearchTerm, sortResults } from '../src/service.js';
 import { recreateBody, formFromInspect, buildEdit, limitsOf } from '../src/recreate.js';
 
 const A = 'a'.repeat(64), B = 'b'.repeat(64);
@@ -179,4 +179,18 @@ test('服务：检查更新、批量更新、资源采样与增量日志的调�
 	delete replies['sight.docker.check_list'];
 	replies['sight.docker.container.list'].body[0].Image = 'busybox:stable';
 	assert.deepEqual((await svc.load()).checks, {});
+});
+
+test('搜索 Docker Hub：关键词校验、官方在前按星数排序；连不上时给出可操作的说明', async () => {
+	for (const ok of ['nginx', 'linuxserver/qbittorrent', 'home assistant', 'a.b_c-d']) assert.ok(isSearchTerm(ok), ok);
+	for (const bad of ['', ' ', '-x', 'a;id', '$(id)', 'x'.repeat(101)]) assert.ok(!isSearchTerm(bad), bad);
+	assert.deepEqual(sortResults([{ name: 'b', stars: 5 }, { name: 'z', stars: 1, official: true }, { name: 'a', stars: 5 }, { name: 'c', stars: 50 }]).map(r => r.name), ['z', 'c', 'a', 'b']);
+	const calls = [];
+	let reply = { results: [{ name: 'x/nginx', stars: 1, official: false }, { name: 'nginx', stars: 9, official: true }] };
+	const svc = createDocker({ call: async (o, m, p) => { calls.push([o, m, p]); return reply; } }, {});
+	assert.deepEqual((await svc.search(' nginx ')).map(r => r.name), ['nginx', 'x/nginx']);
+	assert.deepEqual(calls.at(-1), ['sight.docker', 'search', { term: 'nginx' }]);
+	await assert.rejects(svc.search('a;id'), /letters, digits/);
+	reply = { error: 'timeout' };
+	await assert.rejects(svc.search('nginx'), e => e.reason === 'timeout' && /could not be reached/.test(e.message));
 });

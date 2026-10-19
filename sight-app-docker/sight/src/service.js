@@ -477,6 +477,7 @@ const ERRORS = {
 	in_use: 'A terminal for this container is already open. End it first.',
 	not_installed: 'A required program is missing on the device. Reinstall sight-app-docker.',
 	exists: 'A project with this name already exists',
+	timeout: 'Docker Hub could not be reached. Check the internet connection, or type the image name directly.',
 	invalid_compose: 'Compose could not read this file. Check the indentation, keys and values.',
 };
 /** 纯函数：sight.docker 返回体里的 error → Error（英文 msgid） */
@@ -485,6 +486,15 @@ export function replyError(r) {
 	const e = new Error(ERRORS[r.error] || r.error);
 	e.reason = r.error;
 	return e;
+}
+
+/* 搜索关键词：字母数字开头，只含字母数字与 . _ - / 空格，与设备端一致 */
+const TERM_RE = /^[A-Za-z0-9][A-Za-z0-9._/ -]*$/;
+export const isSearchTerm = s => typeof s === 'string' && s.trim().length <= 100 && TERM_RE.test(s.trim());
+
+/** 纯函数：搜索结果排序：官方镜像在前，其余按星数从多到少 */
+export function sortResults(results) {
+	return [...(results || [])].sort((a, b) => (b.official ? 1 : 0) - (a.official ? 1 : 0) || b.stars - a.stars || a.name.localeCompare(b.name));
 }
 
 /** 纯函数：拉取进度百分比；层大小未知时为 null */
@@ -675,6 +685,11 @@ export function createDocker(client, uci) {
 			const { inspect, base } = await this.recreateBase(id);
 			if (!canUpdate(inspect.Config?.Image)) throw new Error('This container was created from an image ID, so there is no newer version to look for');
 			return (await sight('recreate_start', { id, mode: 'update', name: '', body: base.body })).task;
+		},
+		/** 在 Docker Hub 搜索镜像 → [{ name, description, stars, official }]（已排序） */
+		async search(term) {
+			if (!isSearchTerm(term)) throw new Error('Search with letters, digits, dots, dashes and slashes');
+			return sortResults((await sight('search', { term: term.trim() })).results);
 		},
 		/** 检查这些镜像在仓库里是否有新版（不下载） */
 		async checkStart(images) { return (await sight('check_start', { images })).task; },

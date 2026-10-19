@@ -10,6 +10,7 @@
 	import Settings from './Settings.svelte';
 	import Storage from './Storage.svelte';
 	import TaskProgress from './TaskProgress.svelte';
+	import ImageSearch from './ImageSearch.svelte';
 
 	/* 按日常任务：看哪些容器在跑、各占多少 CPU 与内存、启停重启、打开网页、看日志、进终端；新建、编辑、删除容器；
 	   检查哪些容器有新版镜像并逐个或全部更新；Compose 项目；下载与清理镜像；网络与卷；存储空间与清理；镜像加速与数据目录在「设置」。
@@ -404,6 +405,7 @@
 			{#if pullOpen}
 				<form class="form" onsubmit={submitPull} aria-label={t('Download image')} data-pull-form>
 					<ErrorSummary errors={pullErrors} bind:this={pullSummary} />
+					<ImageSearch {svc} selected={normalizeImage(pullRef)} onpick={ref => { pullRef = ref; pullErrors = []; }} />
 					<Field id="pull-image" label={t('Image')} help={t('From Docker Hub unless a registry is given, for example ghcr.io/owner/app:tag. Without a tag, latest is used.')}>
 						<Input id="pull-image" name="pullImage" bind:value={pullRef} placeholder="nginx:latest" spellcheck="false" autocomplete="off" aria-describedby="pull-image-help" />
 					</Field>

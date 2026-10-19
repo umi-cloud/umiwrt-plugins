@@ -370,5 +370,15 @@
 	"Search containers": "搜索容器",
 	"No containers match the search.": "没有符合搜索的容器。",
 	"Matching containers are in the Compose projects below.": "符合搜索的容器在下方的 Compose 项目中。",
-	"This device may not support memory or CPU limits. Edit the container and clear the limits.": "本设备可能不支持内存或 CPU 限制，请编辑容器并清空限制。"
+	"This device may not support memory or CPU limits. Edit the container and clear the limits.": "本设备可能不支持内存或 CPU 限制，请编辑容器并清空限制。",
+	"Search with letters, digits, dots, dashes and slashes": "搜索词只能包含字母、数字、点、短横线和斜杠",
+	"Docker Hub could not be reached. Check the internet connection, or type the image name directly.": "连不上 Docker Hub。请检查外网连接，或直接填写镜像名。",
+	"Search Docker Hub, for example nginx": "搜索 Docker Hub，例如 nginx",
+	"Search Docker Hub": "搜索 Docker Hub",
+	"Searching…": "正在搜索…",
+	"No images found on Docker Hub": "Docker Hub 上没有找到镜像",
+	"Search results": "搜索结果",
+	"Official": "官方",
+	"%d stars": "%d 星",
+	"Search": "搜索"
 }

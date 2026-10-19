@@ -1,6 +1,6 @@
 {
 	"sight-plugin-docker": {
-		"description": "Sight Docker page: containers (create, edit and update by recreating, check for and apply updates, start/stop/restart, delete, restart policy, usage, logs, terminal), images, networks, volumes, Compose projects, dockerd settings",
+		"description": "Sight Docker page: containers (create, edit and update by recreating, check for and apply updates, start/stop/restart, delete, restart policy, usage, logs, terminal), images (search Docker Hub and download), networks, volumes, Compose projects, dockerd settings",
 		"read": {
 			"ubus": {
 				"sight.docker": [
@@ -10,6 +10,7 @@
 					"df",
 					"info",
 					"logs",
+					"search",
 					"task_status",
 					"terminal_status",
 					"usage",
