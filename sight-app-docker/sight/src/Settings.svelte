@@ -1,7 +1,8 @@
 <script>
 	import { onDestroy, tick } from 'svelte';
 	import { t, errorText, useEditor, activity, pending, saveFlow, Button, Callout, Card, Dialog, DynamicList, ErrorSummary, Feedback, FormActions, Input, SettingRow, SettingsGroup } from '@sight/sdk';
-	import { validateSettings, pendingRestart, sameDir, DEFAULT_DATA_ROOT, MIRROR_PRESETS } from './service.js';
+	import { fmtBytes } from '@sight/sdk/lib';
+	import { validateSettings, pendingRestart, sameDir, diskOf, DEFAULT_DATA_ROOT, MIRROR_PRESETS } from './service.js';
 
 	/* Docker 设置（dockerd 的 uci globals 段）：镜像加速与数据目录。保存即生效：写入会话暂存后带回滚应用，
 	   dockerd 的 reload 重读镜像加速，但不换数据目录、也不清掉全部删除的加速地址；运行值与配置不一致时提示重启。 */
@@ -31,6 +32,13 @@
 		} catch (e) { if (alive && request === version) loadError = errorText(e); }
 	}
 	$effect(() => { pending.version; load(); });
+
+	/* 数据盘建议：列出可放 Docker 数据的已挂载盘，一键填入 <挂载点>/docker；数据目录不在任何数据盘上时提示 */
+	let disks = $state(null);
+	svc.loadDisks().then(d => { if (alive) disks = d; });
+	const size = b => b >= 1099511627776 ? (b / 1099511627776).toFixed(1) + ' TB' : fmtBytes(b);
+	const draftDisk = $derived(disks && draft ? diskOf(draft.dataRoot.trim(), disks.usable) : null);
+	function useDisk(d) { if (!locked) draft.dataRoot = d.mount.replace(/\/+$/, '') + '/docker'; }
 
 	const configuredRoot = $derived(base ? base.dataRoot || DEFAULT_DATA_ROOT : '');
 	const rootChanged = $derived(!!draft && !sameDir(draft.dataRoot.trim() || DEFAULT_DATA_ROOT, root));
@@ -127,6 +135,16 @@
 					<Input id="docker-data-root" name="dockerDataRoot" bind:value={draft.dataRoot} disabled={locked} placeholder={DEFAULT_DATA_ROOT} spellcheck="false" autocomplete="off"
 						aria-describedby="docker-data-root-description" aria-invalid={!!fieldError('docker-data-root')} />
 				</SettingRow>
+				{#if disks?.usable.length}
+					<div class="disks" data-docker-disks>
+						{#each disks.usable as d (d.mount)}
+							<Button size="compact" disabled={locked || draftDisk?.mount === d.mount} onclick={() => useDisk(d)} data-disk={d.mount}>{t('Use %s (%s free)', d.title, size(d.free))}</Button>
+						{/each}
+					</div>
+					{#if !draftDisk}<Callout tone="warning" message={t('The data directory is on the router’s internal storage, which is small. Use one of the disks above.')} />{/if}
+				{:else if disks?.unsupported.length}
+					<p class="muted" data-docker-disks="unsupported">{t('Disks formatted as %s cannot hold Docker data. Format one as ext4 on the Storage page.', [...new Set(disks.unsupported.map(d => d.fstype))].join(', '))} <a href="#/storage">{t('Open Storage')}</a></p>
+				{/if}
 				{#if rootChanged && draft.dataRoot.trim() !== base.dataRoot}
 					<Callout tone="warning" message={t('After the change and a restart of Docker, existing images and containers are no longer shown. They stay in %s and come back if you switch back.', root)} />
 				{/if}
@@ -139,6 +157,6 @@
 <style lang="less">
 	.form { display: flex; flex-direction: column; gap: var(--sp-5); }
 	.mirrors { display: flex; flex-direction: column; gap: var(--sp-2); }
-	.presets { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); }
+	.presets, .disks { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); }
 	.muted { margin: 0; color: var(--text-muted); font-size: var(--fs-xs); }
 </style>

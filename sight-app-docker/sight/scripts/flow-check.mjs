@@ -13,7 +13,8 @@
  *   8. 编辑容器重建；端口冲突时重建失败并恢复原容器
  *   9. 网络与卷的新建、删除，清理未使用的卷
  *  10. Compose：新建项目、启动、编辑后重建、拉取更新、停止、删除（连同卷）；别处创建的项目只读显示并可停止
- *  11. 设置：镜像加速与数据目录写入 uci、经 reload 生效再恢复；未配置加速时一键使用国内镜像；窄屏截图
+ *  11. 设置：镜像加速与数据目录写入 uci、经 reload 生效再恢复；未配置加速时一键使用国内镜像；窄屏截图；
+ *      宿主有 sight.storage 时挂一块 ext4 的 loop 盘，核对数据盘建议与一键填入（只在有调试容器标记时做）
  *  12. 装包预置国内镜像加速只做一次
  * 会修改并恢复配置。公共底座取自 sight-ui 工程：
  *   DOCKER_LOCAL=1 SIGHT_UI=/path/to/sight-ui LUCI_URL=http://127.0.0.1:8148 CONTAINER=<专用容器> node sight/scripts/flow-check.mjs
@@ -122,10 +123,16 @@ await withAclUser(['sight-ui', 'sight-plugin-docker'], async sid => {
 });
 
 let dockerReady = false;
-try { DIND('docker start sight-web >/dev/null; docker inspect sight-job >/dev/null'); dockerReady = /"code":\s*200/.test(sh('ubus call docker version')); } catch { dockerReady = false; }
+try { DIND('docker start sight-web >/dev/null; docker inspect sight-job >/dev/null'); dockerReady = /"code":\s*200/.test(sh('ubus call sight.docker version')); } catch { dockerReady = false; }
 const original = {};
 const flowVolumes = [];
 let certAdded = false;
+/* 数据盘建议：调试容器（有 /etc/sight-dev-container 标记、能用 losetup）里临时挂一块 ext4 盘 */
+const DISK_IMG = '/root/sight-docker-disk.img', DISK_MNT = '/mnt/sight-docker-check';
+let diskLoop = '';
+if (sh('[ -f /etc/sight-dev-container ] && ubus list sight.storage >/dev/null 2>&1 && command -v losetup >/dev/null && echo yes || echo no').trim() === 'yes') {
+	diskLoop = sh(`dd if=/dev/zero of=${DISK_IMG} bs=1M count=64 2>/dev/null; l=$(losetup -f --show ${DISK_IMG}); mkfs.ext4 -q -F $l >/dev/null 2>&1; mkdir -p ${DISK_MNT}; mount -t ext4 $l ${DISK_MNT}; echo $l`).trim();
+}
 if (dockerReady) {
 	original.policy = DIND(`docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' sight-web`).trim() || 'no';
 	original.root = sh('uci -q get dockerd.globals.data_root || true').trim();
@@ -566,6 +573,14 @@ try {
 		section('设置');
 		await tab('Settings');
 		await waitFor(`!!document.querySelector('[data-docker-settings]')`, '设置表单');
+		if (diskLoop) {
+			const disk = `document.querySelector('[data-docker-disks] [data-disk="${DISK_MNT}"]')`;
+			await waitFor(`!!${disk}`, '数据盘建议');
+			const onInternal = !original.root || !original.root.startsWith('/mnt/');
+			if (onInternal) check(await page.evaluate(`/internal storage/.test(document.querySelector('[data-docker-settings]').textContent)`), '数据目录在内部存储上时提示改用数据盘');
+			await page.evaluate(`${disk}.click()`);
+			check(await page.evaluate(`document.getElementById('docker-data-root').value`) === `${DISK_MNT}/docker` && await page.evaluate(`${disk}.disabled`), '列出已挂载的 ext4 数据盘，一键填入 <挂载点>/docker');
+		}
 		await fill({ 'docker-mirrors': MIRROR, 'docker-data-root': FLOW_ROOT });
 		await waitFor(`/are no longer shown/.test(document.querySelector('[data-docker-settings]').textContent)`, '数据目录提示');
 		check(true, '改数据目录前提示原有镜像与容器不可见');
@@ -574,7 +589,7 @@ try {
 		await apply('Docker 设置');
 		check(sh('uci -q get dockerd.globals.registry_mirrors').trim() === MIRROR && sh('uci -q get dockerd.globals.data_root').trim() === FLOW_ROOT, '设置写入 dockerd 配置');
 		let mirrors = [];
-		for (let i = 0; i < 20 && !mirrors.includes(MIRROR + '/'); i++) { await sleep(500); mirrors = json('ubus call docker info').body.RegistryConfig?.Mirrors || []; }
+		for (let i = 0; i < 20 && !mirrors.includes(MIRROR + '/'); i++) { await sleep(500); mirrors = json('ubus call sight.docker info').body.RegistryConfig?.Mirrors || []; }
 		check(mirrors.includes(MIRROR + '/'), '镜像加速经 reload 生效，无需重启 Docker', mirrors);
 		await waitFor(`/Docker is still using/.test(document.querySelector('[data-docker-settings]')?.textContent || '')`, '重启提示');
 		check(true, '数据目录与运行中的不一致时提示重启 Docker');
@@ -590,7 +605,7 @@ try {
 		await clickText('[data-restart-needed] button', 'Restart Docker');
 		await confirmDialog('Restart');
 		await waitFor(`!!document.querySelector('[data-docker="up"]') && !!document.querySelector('[data-docker-settings]') && !document.querySelector('[data-restart-needed]')`, '重启 Docker', 90000);
-		const after = json('ubus call docker info').body.RegistryConfig?.Mirrors || [];
+		const after = json('ubus call sight.docker info').body.RegistryConfig?.Mirrors || [];
 		check(!after.includes(MIRROR + '/'), '经界面重启 Docker 后加速地址清除、不再提示重启', after);
 		/* 没有加速地址：显著提示，一键使用国内镜像（暂存 + 保存即生效） */
 		await waitFor(`!!document.querySelector('[data-mirror-suggest]')`, '国内镜像提示');
@@ -600,7 +615,7 @@ try {
 		await apply('使用国内镜像');
 		check(sh('uci -q get dockerd.globals.registry_mirrors || true').trim() === PRESETS.join(' '), '一键写入国内镜像加速', sh('uci -q get dockerd.globals.registry_mirrors || true'));
 		let presetMirrors = [];
-		for (let i = 0; i < 20 && presetMirrors.length < PRESETS.length; i++) { await sleep(500); presetMirrors = json('ubus call docker info').body.RegistryConfig?.Mirrors || []; }
+		for (let i = 0; i < 20 && presetMirrors.length < PRESETS.length; i++) { await sleep(500); presetMirrors = json('ubus call sight.docker info').body.RegistryConfig?.Mirrors || []; }
 		check(PRESETS.every(p => presetMirrors.includes(p + '/')), '国内镜像加速经 reload 生效', presetMirrors);
 		await waitFor(`!document.querySelector('[data-mirror-suggest]')`, '提示消失', 10000);
 		check(true, '已配置加速后不再提示');
@@ -656,6 +671,7 @@ try {
 		check(first === PRESETS.join(' ') && mark === '1' && second === '' && own === 'https://own.example', '未设置过时预置国内加速并打标记；删光后不再加回；已有地址不覆盖', { first, mark, second, own });
 	}
 } finally {
+	if (diskLoop) sh(`umount ${DISK_MNT}; losetup -d ${diskLoop}; rm -f ${DISK_IMG}; rmdir ${DISK_MNT}; true`);
 	if (dockerReady) {
 		/* 无论成败都恢复：删除流程容器、项目、网络、卷与下载的镜像，恢复重启策略、证书与 dockerd 设置 */
 		const cleanup = [`docker rm -f ${NEW} ${UPD} ${UPD}-sight-old >/dev/null 2>&1; true`, `docker update --restart=${original.policy} sight-web >/dev/null`,
@@ -671,10 +687,10 @@ try {
 			const seeded = original.seeded ? `uci set dockerd.globals.sight_mirrors_seeded='${original.seeded}';` : 'uci -q delete dockerd.globals.sight_mirrors_seeded;';
 			sh(`uci -q delete dockerd.globals.registry_mirrors; ${mirrors} ${root} ${seeded} uci commit dockerd; rm -rf /tmp/sight-flow`);
 			/* 运行中的加速地址与配置不一致时重启 dockerd（reload 清不掉），再拉起 sight-web */
-			const running = JSON.stringify((json('ubus call docker info').body.RegistryConfig?.Mirrors || []).map(m => m.replace(/\/$/, '')).sort());
+			const running = JSON.stringify((json('ubus call sight.docker info').body.RegistryConfig?.Mirrors || []).map(m => m.replace(/\/$/, '')).sort());
 			const wanted = JSON.stringify(original.mirrors ? original.mirrors.split(/\s+/).sort() : []);
 			sh(running === wanted ? '/etc/init.d/dockerd reload' : '/etc/init.d/dockerd restart');
-			for (let i = 0; i < 30; i++) { try { if (/"code":\s*200/.test(sh('ubus call docker version'))) break; } catch { /* 等待 */ } await sleep(1000); }
+			for (let i = 0; i < 30; i++) { try { if (/"code":\s*200/.test(sh('ubus call sight.docker version'))) break; } catch { /* 等待 */ } await sleep(1000); }
 			DIND('docker start sight-web >/dev/null');
 		} catch { /* 忽略 */ }
 	}

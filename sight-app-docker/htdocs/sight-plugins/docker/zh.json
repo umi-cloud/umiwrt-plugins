@@ -311,5 +311,9 @@
 	"Waiting for the terminal tab to connect. The session ends if nobody connects within %d seconds.": "等待终端标签页连接；%d 秒内没有连接会话即结束。",
 	"docker-compose exited with code %d": "docker-compose 退出，返回码 %d",
 	"docker-compose is not installed on the device. Reinstall sight-app-docker.": "设备上没有安装 docker-compose，请重新安装 sight-app-docker。",
-	"Run containers on the router: create, edit, update and open them, use a terminal, run Compose projects, manage images, networks and volumes, and set a registry mirror.": "在路由器上运行容器：新建、编辑、更新与打开容器，使用终端，运行 Compose 项目，管理镜像、网络与卷，设置镜像加速。"
+	"Run containers on the router: create, edit, update and open them, use a terminal, run Compose projects, manage images, networks and volumes, and set a registry mirror.": "在路由器上运行容器：新建、编辑、更新与打开容器，使用终端，运行 Compose 项目，管理镜像、网络与卷，设置镜像加速。",
+	"Use %s (%s free)": "使用 %s（剩余 %s）",
+	"The data directory is on the router’s internal storage, which is small. Use one of the disks above.": "数据目录在路由器的内部存储上，空间较小，建议改用上面的数据盘。",
+	"Disks formatted as %s cannot hold Docker data. Format one as ext4 on the Storage page.": "格式为 %s 的磁盘不能存放 Docker 数据，请在「存储」页把一块盘格式化为 ext4。",
+	"Open Storage": "打开存储"
 }

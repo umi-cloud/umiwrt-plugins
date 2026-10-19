@@ -1,7 +1,7 @@
 {
 	"id": "docker",
 	"sdk": 1,
-	"version": "1.3.0+df7278c1",
+	"version": "1.4.0+7845001c",
 	"path": "/docker",
 	"title": "Docker",
 	"description": "Run containers on the router: create, edit, update and open them, use a terminal, run Compose projects, manage images, networks and volumes, and set a registry mirror.",

@@ -27,6 +27,9 @@
 				],
 				"sight.docker.volume": [
 					"list"
+				],
+				"sight.storage": [
+					"list"
 				]
 			},
 			"uci": [

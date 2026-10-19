@@ -342,6 +342,27 @@ export function settingsOf(dockerd) {
 
 const MIRROR_RE = /^https?:\/\/[A-Za-z0-9.-]+(:\d+)?(\/\S*)?$/;
 const DIR_RE = /^\/[^\s"'\\]+$/;
+/* Docker 的 overlay2 需要支持 d_type 的 Linux 文件系统；vfat、exFAT、NTFS 放不了数据 */
+const DOCKER_FS = ['ext4', 'xfs', 'btrfs', 'f2fs'];
+
+/** 纯函数：宿主 sight.storage.list → 可放 Docker 数据的盘（已挂载、非系统卷）与放不了的盘 */
+export function diskChoices(storage) {
+	const usable = [], unsupported = [];
+	for (const d of storage?.disks || []) for (const v of d.volumes || []) {
+		if (v.system || !v.mounts?.length || !v.usage) continue;
+		const item = { mount: v.mounts[0], title: v.label || v.partname || v.name, fstype: v.fstype, free: v.usage.avail, size: v.usage.size };
+		(DOCKER_FS.includes(v.fstype) ? usable : unsupported).push(item);
+	}
+	usable.sort((a, b) => b.free - a.free);
+	return { usable, unsupported };
+}
+
+/** 纯函数：目录落在哪块盘上（取最长的挂载点前缀）；不在任何数据盘上返回 null */
+export function diskOf(dir, usable) {
+	const path = (dir || DEFAULT_DATA_ROOT).replace(/\/+$/, '');
+	return usable.filter(d => path === d.mount || path.startsWith(d.mount + '/')).sort((a, b) => b.mount.length - a.mount.length)[0] || null;
+}
+
 /** 纯函数：设置校验 → [{ message, field }] */
 export function validateSettings(s) {
 	const errors = [];
@@ -513,6 +534,11 @@ export function createDocker(client, uci) {
 		async terminalStop(id) { return !!(await sight('terminal_stop', { id })).stopped; },
 
 		async loadSettings() { return settingsOf(await uci.load('dockerd')); },
+		/** 宿主的存储信息（sight-ui 0.6.0 起有 sight.storage）；没有时返回 null，页面不显示数据盘建议 */
+		async loadDisks() {
+			const r = await probe(client, 'sight.storage', 'list').catch(() => null);
+			return r ? diskChoices(r) : null;
+		},
 		/** 写入会话暂存；由页面经 saveFlow 应用 */
 		async saveSettings(base, next) {
 			const { values, remove } = settingsPlan(base, next);
