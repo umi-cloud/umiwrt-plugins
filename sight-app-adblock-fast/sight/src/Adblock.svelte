@@ -1,7 +1,7 @@
 <script>
 	import { onDestroy, tick } from 'svelte';
-	import { t, errorText, client, useEditor, activity, uci, pending, saveFlow, fmtBytes, Card, StatusHero, SettingRow, Switch, Button, Checkbox, Field, DynamicList, FormActions, ErrorSummary, Feedback } from '@sight/sdk';
-	import { createAdblock, validate, MESSAGES } from './service.js';
+	import { t, errorText, client, useEditor, activity, uci, pending, saveFlow, fmtBytes, Card, StatusHero, SettingRow, Switch, Button, Checkbox, Field, DynamicList, FormActions, ErrorSummary, Feedback, Select, Input } from '@sight/sdk';
+	import { createAdblock, validate, validTime, MESSAGES } from './service.js';
 
 	/* 广告过滤：状态卡（开关、拦截条目数、问题、立即更新）、拦截列表、自定义域名与强制 DNS。
 	   列表、域名与设置一起保存并带回滚应用；开关应用确认后再启用并启动（或停止并停用）服务。 */
@@ -34,6 +34,27 @@
 		} catch (e) { if (alive && request === version) error = errorText(e); }
 	}
 	$effect(() => { pending.version; load(); });
+
+	/* 自动更新：写 crontab 即时生效，不走暂存 */
+	let sched = $state(null), schedBase = $state(''), schedNotice = $state(null), schedBusy = $state(false);
+	const schedDirty = $derived(!!sched && JSON.stringify(sched) !== schedBase);
+	const schedError = $derived(sched && sched.mode !== 'off' && sched.mode !== 'other' && !validTime(sched.time) ? t('Invalid time') : '');
+	async function loadSchedule() {
+		try { const s = await svc.loadSchedule(); if (alive) { sched = s; schedBase = JSON.stringify(s); } }
+		catch (e) { if (alive) schedNotice = { tone: 'error', text: errorText(e) }; }
+	}
+	loadSchedule();
+	async function saveSchedule(event) {
+		event.preventDefault();
+		if (schedBusy || schedError) return;
+		schedBusy = true; schedNotice = null;
+		try {
+			await svc.saveSchedule(sched);
+			if (alive) { schedBase = JSON.stringify(sched); schedNotice = { tone: 'success', text: sched.mode === 'off' ? t('Automatic updates turned off.') : t('Automatic updates saved.') }; }
+		} catch (e) { if (alive) schedNotice = { tone: 'error', text: errorText(e) }; }
+		finally { if (alive) schedBusy = false; }
+	}
+	const dayName = d => [t('Sunday'), t('Monday'), t('Tuesday'), t('Wednesday'), t('Thursday'), t('Friday'), t('Saturday')][d];
 
 	const stateText = s => ({ running: t('Blocking %d domains', s.entries), stopped: t('Off'), failed: t('Not blocking'), working: t('Updating block-lists…') }[s.state]);
 	const tone = s => ({ running: 'success', stopped: 'muted', failed: 'warning', working: 'accent' }[s.state]);
@@ -110,6 +131,41 @@
 			{/if}
 		</Card>
 
+		{#if sched}
+			<Card icon="startup" title={t('Automatic updates')} name="adblock-schedule">
+				<form class="sched" onsubmit={saveSchedule} aria-label={t('Automatic updates')}>
+					<p class="muted">{t('Download the block-lists again on a schedule so new ad and tracker domains are blocked. Runs only while ad blocking is on.')}</p>
+					{#if sched.mode === 'other'}
+						<p class="muted" data-schedule="other">{t('A custom schedule is set: %s. Choose a new one below to replace it.', sched.line)}</p>
+					{/if}
+					<div class="sched-fields">
+						<Field id="adblock-sched-mode" label={t('Frequency')}>
+							<Select id="adblock-sched-mode" bind:value={sched.mode} disabled={schedBusy}>
+								<option value="off">{t('Off')}</option>
+								<option value="daily">{t('Every day')}</option>
+								<option value="weekly">{t('Every week')}</option>
+								{#if sched.mode === 'other'}<option value="other">{t('Custom')}</option>{/if}
+							</Select>
+						</Field>
+						{#if sched.mode === 'weekly'}
+							<Field id="adblock-sched-day" label={t('Day')}>
+								<Select id="adblock-sched-day" bind:value={sched.day} disabled={schedBusy}>
+									{#each [1, 2, 3, 4, 5, 6, 0] as d}<option value={d}>{dayName(d)}</option>{/each}
+								</Select>
+							</Field>
+						{/if}
+						{#if sched.mode === 'daily' || sched.mode === 'weekly'}
+							<Field id="adblock-sched-time" label={t('Time')} error={schedError}>
+								<Input id="adblock-sched-time" type="time" bind:value={sched.time} disabled={schedBusy} />
+							</Field>
+						{/if}
+					</div>
+					{#if schedNotice}<Feedback tone={schedNotice.tone} message={schedNotice.text} compact />{/if}
+					<FormActions busy={schedBusy} disabled={!schedDirty || !!schedError || sched.mode === 'other'} description={t('Takes effect immediately after saving.')} />
+				</form>
+			</Card>
+		{/if}
+
 		<form class="stack" onsubmit={save} aria-label={t('Ad blocking settings')}>
 			<ErrorSummary {errors} bind:this={summary} />
 			<Card icon="logs" title={t('Block-lists')}>
@@ -154,4 +210,7 @@
 	.fields { display: flex; flex-direction: column; gap: var(--sp-4); margin-bottom: var(--sp-4); }
 	.muted { margin: 0; color: var(--text-muted); font-size: var(--fs-sm); }
 	.meta { margin-left: var(--sp-2); font-size: var(--fs-xs); }
+	.sched { display: flex; flex-direction: column; gap: var(--sp-4); }
+	.sched-fields { display: flex; flex-wrap: wrap; gap: var(--sp-4); }
+	.sched-fields > :global(*) { flex: 1 1 12rem; }
 </style>

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readStatus, readConfig, validate, plan, createAdblock } from '../src/service.js';
+import { readStatus, readConfig, validate, plan, createAdblock, readSchedule, buildSchedule } from '../src/service.js';
 
 const CFG = {
 	config: { '.type': 'adblock-fast', '.name': 'config', enabled: '1', force_dns: '1', allowed_domain: ['cdn.jsdelivr.net'] },
@@ -50,4 +50,19 @@ test('启停与更新经宿主的 sight.setInitAction；未安装时返回 null'
 	await svc.afterToggle(true);
 	await svc.update();
 	assert.deepEqual(calls.filter(c => c[0] === 'sight').map(c => c[2].action), ['enable', 'start', 'restart']);
+});
+
+test('自动更新：读写与 LuCI 同格式的 crontab 行，其它任务原样保留', () => {
+	const base = '*/5 * * * * /usr/bin/x.sh\n';
+	assert.deepEqual(readSchedule(base), { mode: 'off', time: '04:00', day: 0 });
+	const daily = buildSchedule(base, { mode: 'daily', time: '03:30', day: 0 });
+	assert.equal(daily, base + '30 3 * * * /etc/init.d/adblock-fast dl # adblock-fast-auto\n');
+	assert.deepEqual(readSchedule(daily), { mode: 'daily', time: '03:30', day: 0 });
+	const weekly = buildSchedule(daily, { mode: 'weekly', time: '04:05', day: 6 });
+	assert.equal(weekly, base + '5 4 * * 6 /etc/init.d/adblock-fast dl # adblock-fast-auto\n');
+	assert.deepEqual(readSchedule(weekly), { mode: 'weekly', time: '04:05', day: 6 });
+	assert.equal(buildSchedule(weekly, { mode: 'off' }), base);
+	/* LuCI 的停用行与其它频率 */
+	assert.equal(buildSchedule(base + '# 0 4 * * * /etc/init.d/adblock-fast dl # adblock-fast-auto-disabled\n', { mode: 'off' }), base);
+	assert.equal(readSchedule('0 */6 * * * /etc/init.d/adblock-fast dl # adblock-fast-auto\n').mode, 'other');
 });
