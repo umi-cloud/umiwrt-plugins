@@ -13,7 +13,6 @@
 	"Turn on one or two lists. Larger lists block more but need more memory.": "开启一两个列表即可。列表越大拦截越多，但占用内存也越多。",
 	"Your own rules": "自定义规则",
 	"Always block": "始终拦截",
-	"One domain per entry, for example ads.example.com": "每项一个域名，例如 ads.example.com",
 	"Never block": "始终放行",
 	"Use this when a site stops working because of ad blocking.": "网站因广告过滤无法正常使用时，把它加到这里。",
 	"Make devices use the router’s DNS": "强制设备使用路由器的 DNS",
@@ -95,5 +94,6 @@
 	"Enter an address starting with http:// or https://": "请填写以 http:// 或 https:// 开头的地址",
 	"This list is already added": "这个列表已经添加过",
 	"Use at most 64 characters": "最多 64 个字符",
-	"%d on.": "已开启 %d 个。"
+	"%d on.": "已开启 %d 个。",
+	"One domain per entry, for example ads.example.com. Its subdomains are blocked too.": "每项一个域名，例如 ads.example.com，其子域名也会一并拦截"
 }

@@ -7,7 +7,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=sight-app-adblock-fast
-PKG_VERSION:=1.3.0
+PKG_VERSION:=1.3.1
 PKG_RELEASE:=1
 
 PKG_LICENSE:=GPL-2.0-only

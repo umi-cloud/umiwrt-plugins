@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readStatus, readConfig, validate, plan, createAdblock, readSchedule, buildSchedule, validateList, newList, listUsage } from '../src/service.js';
+import { readStatus, readConfig, validate, plan, createAdblock, validateList, newList, listUsage } from '../src/service.js';
+import { readSchedule, buildSchedule } from '../src/schedule.js';
 
 const CFG = {
 	config: { '.type': 'adblock-fast', '.name': 'config', enabled: '1', force_dns: '1', allowed_domain: ['cdn.jsdelivr.net'] },
@@ -32,20 +33,22 @@ test('配置：已开启的在前，同组内拦截列表按体积从大到小�
 	assert.deepEqual(c.blocked, []);
 });
 
-test('计划：只写改动；清空域名列表走删除；校验域名格式', () => {
+test('计划：只写改动；清空域名列表走删除；校验域名格式并指向出错的一栏', () => {
 	const before = readConfig(CFG);
 	const form = structuredClone(before);
 	form.lists[2].enabled = true;
 	form.allowed = [];
-	form.blocked = ['ads.example.com', '*.tracker.net'];
+	form.blocked = ['ads.example.com', 'tracker.net'];
 	form.forceDns = false;
 	assert.deepEqual(validate(form), []);
 	assert.deepEqual(plan(before, form), [
-		{ op: 'set', section: 'config', values: { force_dns: '0', blocked_domain: ['ads.example.com', '*.tracker.net'] }, remove: ['allowed_domain'] },
+		{ op: 'set', section: 'config', values: { force_dns: '0', blocked_domain: ['ads.example.com', 'tracker.net'] }, remove: ['allowed_domain'] },
 		{ op: 'set', section: 'l2', values: { enabled: '1' }, remove: [] },
 	]);
 	assert.deepEqual(plan(before, structuredClone(before)), []);
-	assert.deepEqual(validate({ ...form, blocked: ['not a domain'] }), ['Enter domains like ads.example.com']);
+	/* 错误指向出错的那一栏；*.example.com 会被 adblock-fast 丢弃，不接受 */
+	assert.deepEqual(validate({ ...form, allowed: ['not a domain'] }), [{ text: 'Enter domains like ads.example.com', field: 'adblock-allowed' }]);
+	assert.deepEqual(validate({ ...form, blocked: ['*.tracker.net'] }).map(e => e.field), ['adblock-blocked']);
 });
 
 test('自加列表：校验地址与重复，名称缺省取主机名；计划里新增与删除', () => {
