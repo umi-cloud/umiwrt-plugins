@@ -5,7 +5,8 @@
  * Copyright (C) 2023-2024 ImmortalWrt.org
  *
  * HomeProxy 的 Sight 页面接口（rpcd 对象 sight.homeproxy）。
- * 前半部分移植自上游 luci-app-homeproxy 的 luci.homeproxy，保留原方法名与 { result, error } 返回形态便于比对；
+ * 前半部分移植自上游 luci-app-homeproxy 的 luci.homeproxy，保留原方法名与 { result, error } 返回形态便于比对
+ * （服务端相关的 certificate_write、singbox_generator 已删除：Sight 不管理服务端）；
  * 后半部分是 Sight 增加的方法，失败按 docs/rpc.md 用状态码结束（fail(req, STATUS.*)）。
  */
 
@@ -33,6 +34,9 @@ const CORE_DIR = '/tmp/sight-homeproxy';
 const CORE_TASK = CORE_DIR + '/core.json', CORE_LOG = CORE_DIR + '/core.log', CORE_LOCK = CORE_DIR + '/start.lock';
 const CORE_RUNNER = '/usr/libexec/sight-homeproxy-core';
 const CORE_OUTPUT_LIMIT = 8192;
+/* 订阅更新：脚本联网拉取、改配置并重启服务，可能超过 rpcd 调用超时，同样放到后台；结果由脚本写入 subscription_status.json */
+const SUB_SCRIPT = `${HP_DIR}/scripts/update_subscriptions.uc`;
+const SUB_PID = CORE_DIR + '/subscription.pid', SUB_LOG = CORE_DIR + '/subscription.log', SUB_LOCK = CORE_DIR + '/subscription.lock';
 /* 后台进程写入自己的 pid 之前，按开始时间判断它是否还在启动中 */
 const SPAWN_GRACE = 30;
 /* 系统日志里保留的 sing-box 报错条数 */
@@ -90,6 +94,15 @@ function core_task_state() {
 	return t;
 }
 
+/* 后台订阅更新是否还在进行：pid 文件里的进程仍在，且确实是更新脚本 */
+function subscription_running() {
+	const pid = trim(readfile(SUB_PID) || '');
+	if (!match(pid, /^\d+$/))
+		return false;
+	const cmdline = readfile(`/proc/${pid}/cmdline`) || '';
+	return index(cmdline, 'update_subscriptions') !== -1;
+}
+
 function monotonic_ms() {
 	const c = clock(true);
 	return c[0] * 1000 + c[1] / 1000000;
@@ -123,56 +136,6 @@ const methods = {
 		}
 	},
 
-	/* 服务端证书上传。Sight 页面不含服务端，未在 ACL 放行；保留以便与上游比对 */
-	certificate_write: {
-		args: { filename: 'filename' },
-		call: function(req) {
-			const tmpcert = '/tmp/homeproxy_certificate.tmp';
-			const reject = (error) => { unlink(tmpcert); return { result: false, error }; };
-			const writeCertificate = (filename, priv) => {
-				const filestat = lstat(tmpcert);
-				if (!filestat || filestat.type !== 'file' || filestat.size <= 0)
-					return reject('empty certificate file');
-
-				let filecontent = readfile(tmpcert);
-				if (is_binary(filecontent))
-					return reject('illegal file type: binary');
-
-				/* Kanged from luci-proto-openconnect */
-				const beg = priv ? /^-----BEGIN (RSA|EC) PRIVATE KEY-----$/ : /^-----BEGIN CERTIFICATE-----$/,
-				      end = priv ? /^-----END (RSA|EC) PRIVATE KEY-----$/ : /^-----END CERTIFICATE-----$/,
-				      lines = split(trim(filecontent), /[\r\n]/);
-				let start = false, i;
-
-				for (i = 0; i < length(lines); i++) {
-					if (match(lines[i], beg))
-						start = true;
-					else if (start && !b64dec(lines[i]) && length(lines[i]) !== 64)
-						break;
-				}
-
-				if (!start || i < length(lines) - 1 || !match(lines[i], end))
-					return reject('this does not look like a correct PEM file');
-
-				mkdir(`${HP_DIR}/certs`);
-				writefile(`${HP_DIR}/certs/${filename}.pem`, normalize_text(filecontent));
-				unlink(tmpcert);
-
-				return { result: true };
-			};
-
-			switch (req.args?.filename) {
-			case 'client_ca':
-			case 'server_publickey':
-				return writeCertificate(req.args.filename, false);
-			case 'server_privatekey':
-				return writeCertificate(req.args.filename, true);
-			default:
-				return { result: false, error: 'illegal certificate filename' };
-			}
-		}
-	},
-
 	connection_check: {
 		args: { site: 'site' },
 		call: function(req) {
@@ -194,49 +157,6 @@ const methods = {
 			if (lstat(file))
 				writefile(file, '');
 			return { result: true };
-		}
-	},
-
-	/* 生成密钥对等。Sight 页面未使用，未在 ACL 放行；保留以便与上游比对 */
-	singbox_generator: {
-		args: { type: 'type', params: 'params' },
-		call: function(req) {
-			const type = req.args?.type;
-			if (!(type in ['ech-keypair', 'uuid', 'reality-keypair', 'vapid-keypair', 'wg-keypair']))
-				return { result: false, error: 'illegal type' };
-
-			const result = {};
-			let ech_cfg_set = false, ech_key_set = false;
-			each_line(`/usr/bin/sing-box generate ${type} ${shellquote(req.args?.params || '')}`, (raw) => {
-				const line = trim(raw);
-				if (type === 'uuid')
-					result.uuid = line;
-				else if (type in ['reality-keypair', 'vapid-keypair', 'wg-keypair']) {
-					const priv = match(line, /PrivateKey: (.*)/);
-					if (priv)
-						result.private_key = priv[1];
-					const pub = match(line, /PublicKey: (.*)/);
-					if (pub)
-						result.public_key = pub[1];
-				} else {
-					if (line === '-----BEGIN ECH CONFIGS-----')
-						ech_cfg_set = true;
-					else if (line === '-----BEGIN ECH KEYS-----')
-						ech_key_set = true;
-
-					if (ech_cfg_set)
-						result.ech_cfg = result.ech_cfg ? result.ech_cfg + '\n' + line : line;
-					if (ech_key_set)
-						result.ech_key = result.ech_key ? result.ech_key + '\n' + line : line;
-
-					if (line === '-----END ECH CONFIGS-----')
-						ech_cfg_set = false;
-					else if (line === '-----END ECH KEYS-----')
-						ech_key_set = false;
-				}
-			});
-
-			return { result };
 		}
 	},
 
@@ -377,6 +297,37 @@ const methods = {
 		}
 	},
 
+	/* 开始后台更新订阅；已有更新进行中时不另起，返回 started: false */
+	subscription_start: {
+		call: function(req) {
+			if (!access(SUB_SCRIPT))
+				return fail(req, STATUS.NOT_FOUND);
+
+			mkdir(CORE_DIR, 0o700);
+			if (!mkdir(SUB_LOCK))
+				return { started: false };
+			if (subscription_running()) {
+				rmdir(SUB_LOCK);
+				return { started: false };
+			}
+			writefile(SUB_LOG, '');
+			/* 子 shell 先记下自己的 pid 再 exec 成脚本，pid 文件因此就是脚本进程 */
+			system(`sh -c 'echo $$ > ${SUB_PID}; exec ${SUB_SCRIPT}' </dev/null >>${SUB_LOG} 2>&1 &`);
+			rmdir(SUB_LOCK);
+			return { started: true };
+		}
+	},
+
+	/* 后台订阅更新的进行状态与脚本输出（结果本身在 subscription_status.json） */
+	subscription_task: {
+		call: function() {
+			let output = readfile(SUB_LOG) || '';
+			if (length(output) > CORE_OUTPUT_LIMIT)
+				output = substr(output, length(output) - CORE_OUTPUT_LIMIT);
+			return { running: subscription_running(), output };
+		}
+	},
+
 	/*
 	 * 路由器到各节点服务器端口的 TCP 握手耗时（不经代理）：先逐个解析地址（与 sing-box 一样优先 IPv4），
 	 * 再一起非阻塞 connect，最多等 LATENCY_TIMEOUT。结果为毫秒，或 'timeout' / 'refused' / 'unresolved' / 'udp' / 'error'。
@@ -447,7 +398,7 @@ const methods = {
 					for (let p in pending)
 						if (p.sock === r[0] && !p.done) {
 							const err = p.sock.getopt(socket.SOL_SOCKET, socket.SO_ERROR);
-							results[p.id] = err ? (is_refused(err) ? 'refused' : 'error') : max(1, int(now - p.start + 0.5));
+							results[p.id] = err === null ? 'error' : err ? (is_refused(err) ? 'refused' : 'error') : max(1, int(now - p.start + 0.5));
 							p.sock.close();
 							p.done = true;
 						}

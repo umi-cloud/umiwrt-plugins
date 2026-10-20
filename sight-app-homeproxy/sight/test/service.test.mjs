@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { shape, validateSubscriptions, createHomeProxy, isDnsServer, validateRouting, previewLinks, importValues, planAccess } from '../src/service.js';
+import { shape, validateSubscriptions, previewLinks, importValues, sectionName, planImport, createHomeProxy } from '../src/service.js';
 
 const cfg = {
 	config: { '.type': 'homeproxy', main_node: 'n1', routing_mode: 'gfwlist' },
@@ -8,252 +8,126 @@ const cfg = {
 	n1: { '.type': 'node', '.name': 'n1', label: 'Tokyo', type: 'vless', address: 'jp.example', port: '443', grouphash: 'x' },
 	n2: { '.type': 'node', '.name': 'n2', type: 'socks', address: '127.0.0.1', port: '1080' },
 };
+const recorder = () => { const calls = []; const push = kind => async (...a) => { calls.push([kind, ...a]); }; return { calls, uci: { set: push('set'), remove: push('remove'), add: push('add') } }; };
 
-test('整形：main_node 为 nil 即关闭；节点无标签用节名；服务状态取不到为 null', () => {
+test('整形：main_node 为 nil 即关闭；节点无标签用节名；服务状态取不到为 null；默认值', () => {
 	const d = shape(cfg, { homeproxy: { instances: { 'sing-box-c': { running: true } } } });
 	assert.deepEqual([d.enabled, d.mainNode, d.mode, d.running, d.subscriptions], [true, 'n1', 'gfwlist', true, ['https://a.example/sub']]);
-	assert.deepEqual(d.nodes.map(n => [n.label, n.subscribed]), [['Tokyo', true], ['n2', false]]);
+	assert.deepEqual(d.nodes.map(n => [n.label, !!n.grouphash]), [['Tokyo', true], ['n2', false]]);
+	assert.deepEqual([d.udpNode, d.dnsServer, d.chinaDnsServer, d.ports, d.logLevel, d.ipv6], ['nil', '8.8.8.8', '223.5.5.5', 'all', 'warn', false]);
+	assert.deepEqual([d.lastNode, d.urltestNodes, d.importSettings.packetEncoding], ['', [], 'xudp']);
+	const remembered = shape({ ...cfg, config: { main_node: 'nil', sight_last_node: 'n2', main_urltest_nodes: ['n1', 'gone'] } }, {});
+	assert.deepEqual([remembered.lastNode, remembered.urltestNodes], ['n2', ['n1']]);
+	assert.equal(shape({ ...cfg, config: { main_node: 'nil', sight_last_node: 'gone' } }, {}).lastNode, '');
 	const off = shape({ ...cfg, config: { main_node: 'nil' } }, {});
 	assert.deepEqual([off.enabled, off.mainNode, off.mode, off.running], [false, '', 'bypass_mainland_china', false]);
 	assert.equal(shape(cfg, null).running, null);
 });
 
-test('订阅地址只接受 http(s)', () => {
-	assert.deepEqual(validateSubscriptions(['https://a/b', 'http://c']), []);
-	assert.deepEqual(validateSubscriptions(['ftp://x']), ['Subscription addresses must start with http:// or https://']);
-});
-
-test('写入：关闭写 nil；未知模式/站点/日志拒绝；清空订阅用 delete', async () => {
-	const calls = [];
-	const uci = { set: async (...a) => calls.push(['set', ...a]), remove: async (...a) => calls.push(['remove', ...a]) };
-	const svc = createHomeProxy({ call: async () => ({ result: true }) }, uci);
-	await svc.turnOff();
-	await svc.useNode('n2');
-	await svc.saveSubscriptions([]);
-	assert.deepEqual(calls, [['set', 'homeproxy', 'config', { main_node: 'nil' }], ['set', 'homeproxy', 'config', { main_node: 'n2' }], ['remove', 'homeproxy', 'subscription', ['subscription_url']]]);
-	await assert.rejects(svc.setMode('custom'), /Unknown routing mode/);
-	await assert.rejects(svc.check('evil'), /Unknown site/);
-	await assert.rejects(svc.log('../../etc/shadow'), /Unknown log/);
-	assert.equal(await svc.check('google'), true);
-});
-
-test('整形：UDP 节点、DNS、访问控制名单（MAC 统一大写）、订阅选项', () => {
-	const d = shape({ ...cfg, config: { ...cfg.config, main_udp_node: 'nil', dns_server: 'tls://1.1.1.1' },
+test('整形：名单（MAC 统一大写）、端口、IPv6、导入设置、过滤', () => {
+	const d = shape({ ...cfg, config: { routing_port: '443,8000-9000', ipv6_support: '1', log_level: 'debug' }, infra: { common_port: '80,443' },
 		control: { lan_proxy_mode: 'listed_only', lan_proxy_mac_addrs: ['aa:bb:cc:dd:ee:ff'], lan_direct_mac_addrs: 'aa:aa:aa:aa:aa:aa', lan_gaming_mode_mac_addrs: ['aa:00:00:00:00:01'] },
-		subscription: { ...cfg.subscription, auto_update: '1', allow_insecure: '1', packet_encoding: 'xudp' } }, {});
-	assert.deepEqual([d.udpNode, d.dnsServer, d.chinaDnsServer], ['nil', 'tls://1.1.1.1', '223.5.5.5']);
+		subscription: { ...cfg.subscription, auto_update: '1', allow_insecure: '1', packet_encoding: 'xudp', filter_nodes: 'blacklist', filter_keywords: '到期' } }, {});
 	assert.deepEqual(d.access, { mode: 'listed_only', proxyMacs: ['AA:BB:CC:DD:EE:FF'], directMacs: ['AA:AA:AA:AA:AA:AA'], gamingMacs: ['AA:00:00:00:00:01'], globalMacs: [] });
-	assert.deepEqual([d.autoUpdate, d.viaProxy, d.allowInsecure, d.packetEncoding], [true, false, true, 'xudp']);
+	assert.deepEqual([d.ports, d.portsCustom, d.commonPorts, d.logLevel, d.ipv6], ['custom', '443,8000-9000', '80,443', 'debug', true]);
+	assert.deepEqual([d.autoUpdate, d.viaProxy, d.importSettings], [true, false, { allowInsecure: true, packetEncoding: 'xudp' }]);
+	assert.deepEqual(d.filter, { mode: 'blacklist', keywords: ['到期'], userAgent: '' });
 	assert.equal(shape({ control: { lan_proxy_mode: 'weird' } }, {}).access.mode, 'disabled');
 });
 
-test('DNS 地址：wan、IP、带协议前缀的主机名；裸主机名与乱写拒绝', () => {
-	for (const v of ['wan', '8.8.8.8', '2001:4860:4860::8888', 'tls://dns.google', 'https://dns.alidns.com/dns-query', 'quic://[2606:4700::1111]:853']) assert.ok(isDnsServer(v), v);
-	for (const v of ['', 'dns.google', 'tls://', 'udp://bad host']) assert.ok(!isDnsServer(v), v);
+test('订阅地址只接受 http(s)', () => {
+	assert.deepEqual(validateSubscriptions(['https://a/b', 'http://c']), []);
+	assert.equal(validateSubscriptions(['ftp://x'])[0].msg, 'Subscription addresses must start with http:// or https://');
 });
 
-test('分流校验：UDP 节点须存在；仅国内直连模式校验国内 DNS', () => {
-	const nodes = [{ id: 'n1' }];
-	assert.deepEqual(validateRouting({ mode: 'gfwlist', udpNode: 'same', dnsServer: '8.8.8.8', chinaDnsServer: 'x' }, nodes), []);
-	assert.deepEqual(validateRouting({ mode: 'bypass_mainland_china', udpNode: 'gone', dnsServer: 'bad', chinaDnsServer: 'bad' }, nodes), ['Choose a UDP node', 'Invalid DNS server', 'Invalid China DNS server']);
-});
-
-test('导入：逐行预览去重；订阅的不安全与包编码设置作用于导入节点', () => {
-	const rows = previewLinks('socks5://1.1.1.1:1080\n\nsocks5://1.1.1.1:1080\nbad://x', {});
-	assert.deepEqual(rows.map(r => [r.link, !!r.node]), [['socks5://1.1.1.1:1080', true], ['bad://x', false]]);
+test('导入：预览去重、按订阅设置补选项、具名段名避开已有名字', () => {
+	const p = previewLinks('ss://YWVzLTI1Ni1nY206cGFzcw@5.6.7.8:8388#A\n\nss://YWVzLTI1Ni1nY206cGFzcw@5.6.7.8:8388#A\nbad://x', {});
+	assert.deepEqual(p.map(r => !!r.node), [true, false]);
 	assert.deepEqual(importValues({ type: 'vless', tls: '1' }, { allowInsecure: true, packetEncoding: 'xudp' }), { type: 'vless', tls: '1', tls_insecure: '1', packet_encoding: 'xudp' });
-	assert.deepEqual(importValues({ type: 'socks' }, { allowInsecure: true, packetEncoding: 'xudp' }), { type: 'socks' });
-});
-
-test('访问控制：按模式写对应 MAC 名单，空名单删除选项；全部设备模式不动名单', () => {
-	assert.deepEqual(planAccess('listed_only', ['AA:BB:CC:DD:EE:FF']), { values: { lan_proxy_mode: 'listed_only', lan_proxy_mac_addrs: ['AA:BB:CC:DD:EE:FF'] }, remove: [] });
-	assert.deepEqual(planAccess('except_listed', []), { values: { lan_proxy_mode: 'except_listed' }, remove: ['lan_direct_mac_addrs'] });
-	assert.deepEqual(planAccess('disabled', ['AA:BB:CC:DD:EE:FF']), { values: { lan_proxy_mode: 'disabled' }, remove: [] });
-});
-
-test('删除节点：主节点与 UDP 节点在用时拒绝；规则库更新状态码映射', async () => {
-	const calls = [];
-	const svc = createHomeProxy({ call: async (o, m, p) => { calls.push([o, m, p]); return m === 'resources_update' ? { status: 3 } : {}; } }, { remove: async (...a) => calls.push(['remove', ...a]) });
-	await assert.rejects(svc.removeNode('n1', { mainNode: 'n1', udpNode: 'same' }), /in use/);
-	await assert.rejects(svc.removeNode('n2', { mainNode: 'n1', udpNode: 'n2' }), /in use/);
-	await svc.removeNode('n3', { mainNode: 'n1', udpNode: 'same' });
-	assert.deepEqual(calls.at(-1), ['remove', 'homeproxy', 'n3']);
-	assert.equal(await svc.updateResource('gfw_list'), 'latest');
-	await assert.rejects(svc.updateResource('../x'), /Unknown resource/);
-	await assert.rejects(svc.cleanLog('sing-box-s'), /Unknown log/);
-});
-
-test('规则库：有版本号时忽略残留的 error 字段（真机情形）；按模式列出缺失的规则库', async () => {
-	const { missingResources } = await import('../src/service.js');
-	const svc = createHomeProxy({ call: async (o, m, p) => p.type === 'china_ip4' ? { version: '20261009094558', error: 'No such file or directory' } : p.type === 'gfw_list' ? { error: 'No such file' } : { version: '202610092207', error: null } }, {});
-	const v = await svc.resourceVersions();
-	assert.equal(v.china_ip4, '20261009094558');
-	assert.equal(v.gfw_list, null);
-	assert.deepEqual(missingResources('bypass_mainland_china', v), []);
-	assert.deepEqual(missingResources('gfwlist', v), ['gfw_list']);
-	assert.deepEqual(missingResources('global', v), []);
-	assert.deepEqual(missingResources('gfwlist', null), []);
-});
-
-test('域名列表：解析去重；只写有变化的列表，代理开着才重载服务；非法域名拒绝', async () => {
-	const { parseDomains, validateDomains } = await import('../src/service.js');
-	assert.deepEqual(parseDomains('Claude.com\r\n\n example.org \nclaude.com\n'), ['claude.com', 'example.org']);
-	assert.deepEqual(validateDomains(['a.example', 'bad domain']), ['Invalid domain']);
-	const calls = [];
-	const svc = createHomeProxy({ call: async (o, m, p) => { calls.push([o, m, p]); return m === 'acllist_read' ? { content: p.type === 'proxy_list' ? 'claude.com\n' : '' } : { result: true }; } }, {});
-	const cur = await svc.domainLists();
-	assert.deepEqual(cur, { proxy_list: ['claude.com'], direct_list: [] });
-	calls.length = 0;
-	await svc.saveDomainLists({ proxy_list: ['claude.com'], direct_list: ['nas.example'] }, cur, true);
-	assert.deepEqual(calls, [['sight.homeproxy', 'acllist_write', { type: 'direct_list', content: 'nas.example' }], ['sight', 'setInitAction', { name: 'homeproxy', action: 'reload' }]]);
-	calls.length = 0;
-	await svc.saveDomainLists({ proxy_list: [], direct_list: [] }, cur, false);
-	assert.deepEqual(calls, [['sight.homeproxy', 'acllist_write', { type: 'proxy_list', content: '' }]]);
-	await assert.rejects(svc.saveDomainLists({ proxy_list: ['-bad'], direct_list: [] }, cur, false), /Invalid domain/);
-});
-
-test('延迟：TCP 按节点段名成批测；UDP 节点的 ping 解析平均值，全丢包为超时，IPv6 地址不支持', async () => {
-	const { parsePing } = await import('../src/service.js');
-	assert.equal(parsePing('3 packets transmitted, 3 packets received\nround-trip min/avg/max = 20.1/23.6/30.2 ms'), 24);
-	assert.equal(parsePing('rtt min/avg/max/mdev = 0.036/0.042/0.048/0.005 ms'), 1);
-	assert.equal(parsePing('3 packets transmitted, 0 packets received, 100% packet loss'), null);
-	const calls = [];
-	const svc = createHomeProxy({ call: async (o, m, p) => {
-		calls.push([o, m, p]);
-		if (m === 'node_latency') return { results: { n1: 12, n2: 'udp' } };
-		return { stdout: p.params.at(-1) === '192.0.2.1' ? '100% packet loss' : 'round-trip min/avg/max = 5.0/6.4/8.0 ms' };
-	} }, {});
-	assert.deepEqual(await svc.latency(['n1', 'n2']), { n1: 12, n2: 'udp' });
-	assert.deepEqual(calls[0], ['sight.homeproxy', 'node_latency', { nodes: ['n1', 'n2'] }]);
-	assert.equal(await svc.ping({ address: 'node.example' }), 6);
-	assert.equal(await svc.ping({ address: '192.0.2.1' }), 'timeout');
-	assert.equal(await svc.ping({ address: '2001:db8::1' }), 'unsupported');
-});
-
-test('诊断：日志时间统一成可比较的本地时间', async () => {
-	const { logTime } = await import('../src/service.js');
-	assert.equal(logTime('2026-10-19 14:08:11 [DAEMON] sing-box 1.12.25 started.'), '20261019140811');
-	assert.equal(logTime('Mon Oct 19 14:09:16 2026 daemon.err sing-box[1]: FATAL'), '20261019140916');
-	assert.equal(logTime('Sun Oct  5 03:00:01 2026 daemon.err sing-box[1]: FATAL'), '20261005030001');
-	assert.equal(logTime('\x1b[31mFATAL\x1b[0m[0000] decode config'), '');
-});
-
-test('诊断：启动时生成或检查配置失败、启动后退出、找不到原因', async () => {
-	const { diagnose } = await import('../src/service.js');
-	const checkFailed = [
-		'2026-10-19 14:06:00 [DAEMON] sing-box 1.12.25 started.',
-		'2026-10-19 14:06:42 [DAEMON] Service stopped.',
-		'\x1b[31mFATAL\x1b[0m[0000] decode config at /var/run/homeproxy/sing-box-c.json: outbounds[2].uuid: json: unknown field "uuid"',
-		'2026-10-19 14:06:42 [DAEMON] Error: wrong client configuration detected.',
-	].join('\n');
-	assert.deepEqual(diagnose(checkFailed, []), { reason: 'check', detail: 'decode config at /var/run/homeproxy/sing-box-c.json: outbounds[2].uuid: json: unknown field "uuid"', log: 'homeproxy' });
-	/* ucode 报错的第一行是原因，后面是调用位置 */
-	const generateFailed = ['2026-10-19 14:06:42 [DAEMON] Service stopped.', 'Reference error: access to undeclared variable x', 'In main(), file generate_client.uc, line 10, byte 5:', '2026-10-19 14:06:42 [DAEMON] Error: failed to generate client configuration.'].join('\n');
-	assert.deepEqual(diagnose(generateFailed, []), { reason: 'generate', detail: 'Reference error: access to undeclared variable x', log: 'homeproxy' });
-
-	const started = '2026-10-19 14:06:42 [DAEMON] Error: wrong client configuration detected.\n2026-10-19 14:08:11 [DAEMON] sing-box 1.12.25 started.\n';
-	const fatal = [
-		'Mon Oct 19 14:06:44 2026 daemon.err sing-box[1]: \x1b[31mFATAL\x1b[0m[0002] start service: context canceled',
-		'Mon Oct 19 14:09:16 2026 daemon.err sing-box[2]: \x1b[31mFATAL\x1b[0m[0005] start service: initialize rule-set[0]: EOF',
-		'Mon Oct 19 14:09:16 2026 daemon.info procd: Instance homeproxy::sing-box-c s in a crash loop 6 crashes, 5 seconds since last crash',
-	];
-	assert.deepEqual(diagnose(started, fatal), { reason: 'exited', detail: 'start service: initialize rule-set[0]: EOF', log: 'syslog' });
-	/* 这次启动之前的 FATAL 不算；服务日志被清空时不比较时间 */
-	assert.equal(diagnose(started, fatal.slice(0, 1)), null);
-	assert.equal(diagnose('', fatal.slice(0, 1)).detail, 'start service: context canceled');
-	assert.equal(diagnose(null, []), null);
-});
-
-test('新建段用具名段：前缀加随机串并避开已有名字；导入的多个节点各自取名', async () => {
-	const { sectionName } = await import('../src/service.js');
+	assert.deepEqual(importValues({ type: 'trojan', tls: '1' }, { allowInsecure: false, packetEncoding: 'xudp' }), { type: 'trojan', tls: '1' });
 	const seq = [1, 1, 0xabc];
 	assert.equal(sectionName('rule', ['rule_00000001'], () => seq.shift()), 'rule_00000abc');
-	const calls = [];
-	const svc = createHomeProxy({}, { add: async (...a) => calls.push(a) });
-	await svc.importNodes([{ type: 'socks', label: 'a' }, { type: 'socks', label: 'b' }], { custom: { order: [] } });
-	assert.ok(calls.every(([c, type, name]) => c === 'homeproxy' && type === 'node' && /^node_[0-9a-f]{8}$/.test(name)) && calls[0][2] !== calls[1][2]);
+	const seq2 = [1, 2];
+	assert.deepEqual(planImport([{ type: 'socks' }, { type: 'http' }], { allowInsecure: false, packetEncoding: '' }, [], () => seq2.shift()).map(x => x.name), ['node_00000001', 'node_00000002']);
 });
 
-test('离开自定义模式：代理开着取默认出站的节点，关着写 nil', async () => {
-	const { leaveCustomNode } = await import('../src/service.js');
-	const custom = { defaultOutbound: 'out1', outbounds: [{ id: 'out1', node: 'n2' }], rules: [], rulesets: [], dnsServers: [], dnsRules: [] };
-	const nodes = [{ id: 'n1' }, { id: 'n2' }];
-	assert.equal(leaveCustomNode({ enabled: true, custom, nodes, mainNode: 'n1' }), 'n2');
-	assert.equal(leaveCustomNode({ enabled: true, custom: { ...custom, defaultOutbound: 'direct-out' }, nodes, mainNode: 'n1' }), 'n1');
-	assert.equal(leaveCustomNode({ enabled: false, custom, nodes, mainNode: 'n1' }), 'nil');
+test('写入：关闭写 nil；守卫拒绝未知取值；清空订阅与空名单用 delete', async () => {
+	const { calls, uci } = recorder();
+	const svc = createHomeProxy({ call: async () => ({ result: true }) }, uci);
+	await svc.turnOff('n1');
+	await svc.useNode('n2');
+	await svc.saveSubscriptions([]);
+	await svc.saveAccess('except_listed', []);
+	assert.deepEqual(calls, [['set', 'homeproxy', 'config', { main_node: 'nil', sight_last_node: 'n1' }], ['set', 'homeproxy', 'config', { main_node: 'n2' }], ['remove', 'homeproxy', 'subscription', ['subscription_url']],
+		['set', 'homeproxy', 'control', { lan_proxy_mode: 'except_listed' }], ['remove', 'homeproxy', 'control', ['lan_direct_mac_addrs']]]);
+	await assert.rejects(svc.checkSite('evil'), /Unknown site/);
+	await assert.rejects(svc.readLog('../../etc/shadow'), /Unknown log/);
+	await assert.rejects(svc.setLogLevel('trace'), /Unknown log level/);
+	await assert.rejects(svc.saveDeviceRules([{ mac: 'nope', rule: 'gaming' }]), /Invalid device rule/);
+	await assert.rejects(svc.startCoreTask('nuke'), /Unknown action/);
+	await assert.rejects(svc.updateResource('x'), /Unknown resource/);
+	assert.equal(await svc.checkSite('google'), true);
+});
+
+test('写入：分流与端口；离开自定义模式先定主节点', async () => {
+	const { calls, uci } = recorder();
+	const svc = createHomeProxy({ call: async () => ({}) }, uci);
+	await svc.saveRouting({ mode: 'global', udpNode: 'same', dnsServer: '8.8.8.8', ports: 'all', ipv6: false });
+	assert.deepEqual(calls, [['set', 'homeproxy', 'config', { main_udp_node: 'same', dns_server: '8.8.8.8', routing_mode: 'global' }], ['set', 'homeproxy', 'config', { ipv6_support: '0' }], ['remove', 'homeproxy', 'config', ['routing_port']]]);
+	calls.length = 0;
+	await svc.leaveCustom({ enabled: false, custom: { defaultOutbound: 'nil', outbounds: [] }, mainNode: '', nodes: [] }, { mode: 'global', udpNode: 'same', dnsServer: '8.8.8.8' });
+	assert.deepEqual(calls[0], ['set', 'homeproxy', 'config', { main_node: 'nil' }]);
+});
+
+test('删除节点：在用的（主节点、UDP 节点、出站引用）拒绝', async () => {
+	const { uci } = recorder();
+	const svc = createHomeProxy({ call: async () => ({}) }, uci);
+	const data = { mainNode: 'n1', udpNode: 'n3', used: ['n2'] };
+	for (const id of ['n1', 'n2', 'n3']) await assert.rejects(svc.removeNodes([id], data), /in use/);
+	await svc.removeNodes(['n4'], data);
 });
 
 test('自定义模式：切入时按模板建段并保持开关状态；开关写默认出站并记住上次的去向', async () => {
-	const { shape } = await import('../src/service.js');
-	const calls = [];
-	const uci = { add: async (...a) => calls.push(['add', ...a]), set: async (...a) => calls.push(['set', ...a]), remove: async (...a) => calls.push(['remove', ...a]) };
-	const svc = createHomeProxy({}, uci);
-	const data = shape({ config: { '.name': 'config', main_node: 'n1', routing_mode: 'global', dns_server: '8.8.8.8' }, n1: { '.type': 'node', '.name': 'n1', type: 'socks' } }, {});
-	await svc.enterCustom(data, 'global', s => s);
-	assert.deepEqual(calls.filter(c => c[0] === 'add').map(c => [c[2], c[3]]), [['routing_node', 'sight_proxy'], ['dns_server', 'sight_dns_remote'], ['routing_rule', 'sight_private']]);
-	assert.deepEqual(calls.slice(-3).map(c => [c[2], c[3]]), [['routing', { default_outbound_dns: 'default-dns', default_outbound: 'sight_proxy' }], ['dns', { default_server: 'sight_dns_remote' }], ['config', { routing_mode: 'custom' }]]);
+	const { calls, uci } = recorder();
+	const svc = createHomeProxy({ call: async () => ({}) }, uci);
+	const data = { enabled: true, mainNode: 'n1', nodes: [{ id: 'n1' }], dnsServer: '8.8.8.8', chinaDnsServer: '223.5.5.5', custom: { outbounds: [], order: [], defaultOutbound: 'nil' } };
+	await svc.enterCustom(data, 'blank', s => s);
+	assert.ok(calls.some(c => c[0] === 'add' && c[2] === 'routing_node'));
+	assert.deepEqual(calls.at(-1), ['set', 'homeproxy', 'config', { routing_mode: 'custom' }]);
 	calls.length = 0;
-	const custom = shape({ routing: { '.name': 'routing', default_outbound: 'sight_proxy' }, sight_proxy: { '.type': 'routing_node', '.name': 'sight_proxy', enabled: '1', node: 'n1' } }, {}).custom;
+	const custom = { outbounds: [{ id: 'o1', enabled: true }], defaultOutbound: 'o1', lastOutbound: '', order: [] };
 	await svc.setCustomPower(false, custom);
-	await svc.setCustomPower(true, { ...custom, defaultOutbound: 'nil', lastOutbound: 'direct-out' });
-	await svc.setCustomPower(true, { ...custom, defaultOutbound: 'nil', lastOutbound: 'gone' });
-	assert.deepEqual(calls.map(c => c[3]), [{ default_outbound: 'nil', sight_last_outbound: 'sight_proxy' }, { default_outbound: 'direct-out' }, { default_outbound: 'sight_proxy' }]);
+	assert.deepEqual(calls[0], ['set', 'homeproxy', 'routing', { default_outbound: 'nil', sight_last_outbound: 'o1' }]);
+	await svc.setCustomPower(true, { ...custom, defaultOutbound: 'nil', lastOutbound: 'o1' });
+	assert.deepEqual(calls[1], ['set', 'homeproxy', 'routing', { default_outbound: 'o1' }]);
 });
 
-test('延迟分档与排序：快的在前，失败的其后，未测与不支持最后，同档保持原顺序', async () => {
-	const { latencyTone, sortByLatency } = await import('../src/service.js');
-	assert.deepEqual([1, 150, 151, 350, 351, 'timeout', 'refused', 'unresolved', 'error', 'unsupported', 'testing', undefined].map(latencyTone),
-		['fast', 'fast', 'fair', 'fair', 'slow', 'failed', 'failed', 'failed', 'failed', '', '', '']);
-	const nodes = ['a', 'b', 'c', 'd', 'e', 'f', 'g'].map(id => ({ id }));
-	const latency = { a: 'timeout', b: 320, c: 'unsupported', d: 45, e: 'refused', f: 45 };
-	assert.deepEqual(sortByLatency(nodes, latency).map(n => n.id), ['d', 'f', 'b', 'a', 'e', 'c', 'g']);
-	assert.deepEqual(nodes.map(n => n.id), ['a', 'b', 'c', 'd', 'e', 'f', 'g']);
+test('即时操作：延迟、ping、核心任务、订阅任务、重启失败', async () => {
+	const { uci } = recorder();
+	const svc = createHomeProxy({ call: async (o, m, p) => {
+		if (m === 'node_latency') return { results: { n1: 12, n2: 'udp' } };
+		if (m === 'core_start') return { started: p.action === 'check' };
+		if (m === 'subscription_start') return { started: false };
+		if (m === 'subscription_task') return { running: true };
+		if (m === 'setInitAction') return { result: false };
+		return { stdout: p.params.at(-1) === '192.0.2.1' ? '100% packet loss' : 'round-trip min/avg/max = 5.0/6.4/8.0 ms' };
+	} }, uci);
+	assert.deepEqual(await svc.measureLatency(['n1', 'n2']), { n1: 12, n2: 'udp' });
+	assert.equal(await svc.ping({ address: 'node.example' }), 6);
+	assert.equal(await svc.ping({ address: '192.0.2.1' }), 'timeout');
+	assert.equal(await svc.ping({ address: '2001:db8::1' }), 'unsupported');
+	assert.equal(await svc.startCoreTask('check'), true);
+	assert.equal(await svc.startCoreTask('upgrade'), false);
+	assert.equal(await svc.startSubscriptionUpdate(), false);
+	assert.equal(await svc.subscriptionUpdating(), true);
+	await assert.rejects(svc.restart(), /Restart failed/);
 });
 
-test('核心更新状态：不支持、未检查、进行中、有新版、已是最新、已更新、失败', async () => {
-	const { coreUpdateState } = await import('../src/service.js');
-	assert.deepEqual(coreUpdateState({ supported: false, task: null }), { kind: 'unsupported' });
-	assert.deepEqual(coreUpdateState({ supported: true, task: null }), { kind: 'idle' });
-	assert.deepEqual(coreUpdateState({ supported: true, task: { action: 'check', state: 'running' } }), { kind: 'running', action: 'check' });
-	assert.deepEqual(coreUpdateState({ supported: true, task: { action: 'check', state: 'done', finished: 9, current: '1.12.25-r1', latest: '1.12.26-r1' } }), { kind: 'available', version: '1.12.26-r1', current: '1.12.25-r1', time: 9 });
-	assert.deepEqual(coreUpdateState({ supported: true, task: { action: 'check', state: 'done', finished: 9, current: '1.12.25-r1', latest: '' } }), { kind: 'latest', time: 9 });
-	assert.deepEqual(coreUpdateState({ supported: true, task: { action: 'upgrade', state: 'done', finished: 9, from: 'a', current: 'b', restarted: true } }), { kind: 'upgraded', version: 'b', from: 'a', restarted: true, time: 9 });
-	/* 更新时已是最新：版本没变 */
-	assert.equal(coreUpdateState({ supported: true, task: { action: 'upgrade', state: 'done', finished: 9, from: 'a', current: 'a' } }).kind, 'latest');
-	assert.deepEqual(coreUpdateState({ supported: true, task: { action: 'upgrade', state: 'failed', code: 1 }, output: 'ERROR: x' }), { kind: 'failed', action: 'upgrade', output: 'ERROR: x' });
-});
-
-test('走代理的端口：常用、全部（未设置）、自定义；校验端口与范围；全部端口用 delete', async () => {
-	const { isPortList, planPorts } = await import('../src/service.js');
-	assert.deepEqual([shape(cfg, {}).ports, shape({ ...cfg, config: { routing_port: 'common' } }, {}).ports], ['all', 'common']);
-	const c = shape({ ...cfg, config: { routing_port: '443,8000-9000' }, infra: { common_port: '80,443' } }, {});
-	assert.deepEqual([c.ports, c.portsCustom, c.commonPorts, c.logLevel, c.ipv6], ['custom', '443,8000-9000', '80,443', 'warn', false]);
-	assert.equal(shape({ ...cfg, config: { ipv6_support: '1' } }, {}).ipv6, true);
-	assert.ok(isPortList('443') && isPortList(' 80, 443 ,8000-9000') && isPortList('1-65535'));
-	assert.ok(!isPortList('') && !isPortList('0') && !isPortList('70000') && !isPortList('9000-8000') && !isPortList('80;443') && !isPortList('http'));
-	assert.deepEqual(planPorts('all'), { values: {}, remove: ['routing_port'] });
-	assert.deepEqual(planPorts('common', 'x'), { values: { routing_port: 'common' }, remove: [] });
-	assert.deepEqual(planPorts('custom', ' 80, 443,,8000-9000 '), { values: { routing_port: '80,443,8000-9000' }, remove: [] });
-	assert.deepEqual(validateRouting({ mode: 'custom', ports: 'custom', portsCustom: '80;443' }, []), ['Enter ports such as 443 or 8000-9000, separated by commas']);
-
+test('域名列表：只写有变化的列表，代理开着时重载；非法域名拒绝', async () => {
 	const calls = [];
-	const uci = { set: async (...a) => calls.push(['set', ...a]), remove: async (...a) => calls.push(['remove', ...a]) };
-	const svc = createHomeProxy({ call: async () => ({}) }, uci);
-	await svc.saveRouting({ mode: 'global', udpNode: 'same', dnsServer: '8.8.8.8', ports: 'all', ipv6: false });
-	assert.deepEqual(calls, [['set', 'homeproxy', 'config', { main_udp_node: 'same', dns_server: '8.8.8.8', routing_mode: 'global' }],
-		['set', 'homeproxy', 'config', { ipv6_support: '0' }], ['remove', 'homeproxy', 'config', ['routing_port']]]);
-	await assert.rejects(svc.saveTraffic({ ports: 'custom', portsCustom: 'x' }), /Invalid port list/);
-	await assert.rejects(svc.setLogLevel('trace'), /Unknown log level/);
-});
-
-test('按设备规则：全局代理优先；写入只动按 MAC 的两个名单，空名单用 delete', async () => {
-	const { deviceRules, planDeviceRules } = await import('../src/service.js');
-	assert.deepEqual(deviceRules({ gamingMacs: ['A', 'B'], globalMacs: ['B', 'C'] }), [{ mac: 'B', rule: 'global' }, { mac: 'C', rule: 'global' }, { mac: 'A', rule: 'gaming' }]);
-	assert.deepEqual(planDeviceRules([{ mac: 'aa:bb:cc:dd:ee:01', rule: 'gaming' }]), { values: { lan_gaming_mode_mac_addrs: ['AA:BB:CC:DD:EE:01'] }, remove: ['lan_global_proxy_mac_addrs'] });
-	const calls = [];
-	const uci = { set: async (...a) => calls.push(['set', ...a]), remove: async (...a) => calls.push(['remove', ...a]) };
-	const svc = createHomeProxy({ call: async () => ({}) }, uci);
-	await svc.saveDeviceRules([]);
-	assert.deepEqual(calls, [['remove', 'homeproxy', 'control', ['lan_gaming_mode_mac_addrs', 'lan_global_proxy_mac_addrs']]]);
-	await assert.rejects(svc.saveDeviceRules([{ mac: 'nope', rule: 'gaming' }]), /Invalid device rule/);
+	const svc = createHomeProxy({ call: async (o, m, p) => { calls.push([m, p]); return { result: true }; } }, {});
+	const cur = { proxy_list: ['a.example'], direct_list: [] };
+	await svc.saveDomainLists({ proxy_list: ['a.example', 'b.example'], direct_list: [] }, cur, true);
+	assert.deepEqual(calls, [['acllist_write', { type: 'proxy_list', content: 'a.example\nb.example' }], ['setInitAction', { name: 'homeproxy', action: 'reload' }]]);
+	await assert.rejects(svc.saveDomainLists({ proxy_list: ['-bad'], direct_list: [] }, cur, false), /Invalid domain/);
 });

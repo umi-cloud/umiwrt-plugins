@@ -1,6 +1,7 @@
 <script>
-	import { tick, untrack } from 'svelte';
+	import { untrack } from 'svelte';
 	import { t, useEditor, Input, Select, Checkbox, Field, FormSection, FormActions, ErrorSummary, Disclosure, DynamicList, Callout, Feedback } from '@sight/sdk';
+import { showErrors } from './draft.svelte.js';
 	import { NODE_TYPES, QUIC_TYPES, SS_METHODS, VMESS_SECURITY, VLESS_FLOWS, UTLS, PACKET_ENCODINGS, SS_PLUGINS, SOCKS_VERSIONS, TUIC_CONGESTION, TUIC_RELAY, HY2_OBFS,
 		TRANSPORTS, nodeForm, planNode, validateNode, supported, hasTls, tlsRequired, hasTransport } from './node.js';
 
@@ -28,10 +29,8 @@
 	async function submit(event) {
 		event.preventDefault();
 		if (locked) return;
-		errors = validateNode(form, features).map(e => ({ text: t(e.msg, ...(e.args || [])), field: fid(e.field) }));
-		/* 出错的字段在「高级」里时先展开 */
-		if (errors.some(e => document.getElementById(e.field)?.closest('details:not([open])'))) advancedOpen = true;
-		if (errors.length) { await tick(); summary?.focus(); return; }
+		({ errors } = await showErrors(validateNode(form, features), fid, { summary, openAdvanced: () => advancedOpen = true }));
+		if (errors.length) return;
 		await onsubmit(planNode(form, target.raw));
 	}
 </script>
@@ -55,7 +54,7 @@
 	</Field>
 {/snippet}
 
-<form class="form" onsubmit={submit} aria-label={t('Node')} data-hp-node-form>
+<form class="hp-form" onsubmit={submit} aria-label={t('Node')} data-hp-node-form>
 	{#if target.subscribed}<Callout tone="warning" message={t('This node came from a subscription. Your changes will be overwritten at the next subscription update.')} />{/if}
 	<ErrorSummary {errors} bind:this={summary} />
 
@@ -143,7 +142,7 @@
 		{/if}
 
 		<Disclosure title={t('Advanced')} description={t('Usually filled in by share links and subscriptions.')} bind:open={advancedOpen}>
-			<div class="advanced">
+			<div class="hp-advanced">
 				{#if form.type === 'shadowsocks'}
 					{@render choice('shadowsocks_plugin', t('Plugin'), SS_PLUGINS)}
 					{#if form.shadowsocks_plugin}{@render text('shadowsocks_plugin_opts', t('Plugin options'))}{/if}
@@ -183,8 +182,6 @@
 		description={t('Changes take effect when you save. If the device becomes unreachable, they roll back automatically.')} />
 </form>
 
-<style lang="less">
-	.form { display: flex; flex-direction: column; gap: var(--sp-5); }
+<style>
 	.pair { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: var(--sp-3); }
-	.advanced { display: flex; flex-direction: column; gap: var(--sp-4); }
 </style>

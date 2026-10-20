@@ -5,6 +5,7 @@
  * 过滤（filter_nodes + filter_keywords）在更新订阅时按节点名称逐个正则匹配：黑名单丢弃命中的，白名单只留命中的。
  */
 import { toList } from '@sight/sdk/lib';
+import { OFF, SAME, URLTEST } from './constants.js';
 import { md5 } from './md5.js';
 
 export const FILTER_MODES = ['disabled', 'blacklist', 'whitelist'];
@@ -48,12 +49,16 @@ export function filtered(label, mode, keywords) {
 	return mode === 'whitelist' ? !hit : hit;
 }
 
-/** 关键字按正则使用；脚本遇到无效正则会中止整次更新，必须先拦下 */
+/** 关键字按正则使用；脚本遇到无效正则会中止整次更新，必须先拦下。@returns {{ msg: string, field: string }[]} */
 export function validateFilter({ mode, keywords }) {
 	const e = [];
-	if (!FILTER_MODES.includes(mode)) e.push('Unknown filter mode');
-	if (mode !== 'disabled' && !keywords.length) e.push('Add at least one keyword');
-	for (const k of keywords) { try { new RegExp(k); } catch { e.push('Keywords must be valid regular expressions'); break; } }
+	if (!FILTER_MODES.includes(mode)) e.push({ msg: 'Unknown filter mode', field: 'mode' });
+	if (mode !== 'disabled' && !keywords.length) e.push({ msg: 'Add at least one keyword', field: 'keywords' });
+	for (const k of keywords) {
+		try { new RegExp(k); } catch { e.push({ msg: 'Keywords must be valid regular expressions', field: 'keywords' }); break; }
+		/* 脚本用 POSIX 扩展正则：没有 \d \w \s \b、(?…) 与惰性量词，这些 JS 写法到设备上会让整次更新中止 */
+		if (/\\[dDwWsSbB]|\(\?|[*+?}]\?/.test(k)) { e.push({ msg: 'Keywords must be plain regular expressions: \\d, \\b, (?…) and lazy quantifiers are not supported', field: 'keywords' }); break; }
+	}
 	return e;
 }
 
@@ -70,12 +75,12 @@ export function planFilter({ mode, keywords, userAgent }) {
 export function nodesInUse(cfg) {
 	const used = new Set(), c = cfg.config || {};
 	/* 自定义模式下主节点不生效，但切回其他模式时仍会用到，同样保留 */
-	for (const k of ['main_node', 'main_udp_node']) if (c[k] && !['nil', 'same', 'urltest'].includes(c[k])) used.add(c[k]);
-	if (c.main_node === 'urltest') toList(c.main_urltest_nodes).forEach(n => used.add(n));
-	if (c.main_udp_node === 'urltest') toList(c.main_udp_urltest_nodes).forEach(n => used.add(n));
+	for (const k of ['main_node', 'main_udp_node']) if (c[k] && ![OFF, SAME, URLTEST].includes(c[k])) used.add(c[k]);
+	if (c.main_node === URLTEST) toList(c.main_urltest_nodes).forEach(n => used.add(n));
+	if (c.main_udp_node === URLTEST) toList(c.main_udp_urltest_nodes).forEach(n => used.add(n));
 	/* 出站节即使停用也引用节点：删掉节点后再启用会生成坏配置 */
 	for (const s of Object.values(cfg)) if (s['.type'] === 'routing_node') {
-		if (s.node && s.node !== 'urltest') used.add(s.node);
+		if (s.node && s.node !== URLTEST) used.add(s.node);
 		toList(s.urltest_nodes).forEach(n => used.add(n));
 	}
 	return used;

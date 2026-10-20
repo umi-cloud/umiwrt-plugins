@@ -19,7 +19,7 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const { check, section, sh, ubus, denied, contract, withAclUser, browser, finish } = await createFlow({ id: 'homeproxy', outDir: join(ROOT, '.visual-out/flow') });
 
 section('接口签名');
-contract('sight.homeproxy', { singbox_get_features: {}, connection_check: { site: 'String' }, resources_get_version: { type: 'String' }, resources_update: { type: 'String' }, log_clean: { type: 'String' }, acllist_read: { type: 'String' }, acllist_write: { type: 'String', content: 'String' }, node_latency: { nodes: 'Array' }, client_errors: {}, client_status: {}, core_task: {}, core_start: { action: 'String' } });
+contract('sight.homeproxy', { singbox_get_features: {}, connection_check: { site: 'String' }, resources_get_version: { type: 'String' }, resources_update: { type: 'String' }, log_clean: { type: 'String' }, acllist_read: { type: 'String' }, acllist_write: { type: 'String', content: 'String' }, node_latency: { nodes: 'Array' }, client_errors: {}, client_status: {}, core_task: {}, core_start: { action: 'String' }, subscription_start: {}, subscription_task: {} });
 
 section('ACL：权限来自本包');
 await withAclUser(['sight-ui'], async sid => {
@@ -156,10 +156,10 @@ try {
 		await waitFor(`!!document.getElementById('hp-udp')`, '分流表单');
 		await fill({ 'hp-mode': 'global', 'hp-udp': 'nil', 'hp-dns': 'custom' });
 		await waitFor(`!!document.getElementById('hp-dns-custom')`, '自定义 DNS 输入');
-		await fill({ 'hp-dns-custom': 'dns.google' });
+		await fill({ 'hp-dns-custom': 'http://dns.google' });
 		await page.evaluate(`document.querySelector('form[aria-label="Routing"]').requestSubmit()`);
 		await waitFor(`document.getElementById('hp-dns-custom')?.getAttribute('aria-invalid') === 'true'`, 'DNS 校验');
-		check(true, '不带协议前缀的主机名 DNS 被拦截');
+		check(true, 'sing-box 不支持的 DNS 协议前缀被拦截');
 		await fill({ 'hp-dns-custom': 'tls://dns.google' });
 		await page.evaluate(`document.querySelector('form[aria-label="Routing"]').requestSubmit()`);
 		await apply('分流与 DNS');
@@ -281,8 +281,8 @@ try {
 		check(true, '「查看节点」切到节点列表并按该订阅筛选');
 		await hpTab('subscriptions');
 		await page.evaluate(`[...document.querySelectorAll('[data-hp-group="${subHash}"] button')].find(b => b.textContent.trim() === 'Delete nodes').click()`);
-		await waitFor(`/1 nodes are in use/.test(document.querySelector('dialog[role=alertdialog][open]')?.textContent || '')`, '删除订阅节点确认');
-		await confirmDialog('Delete 1 nodes');
+		await waitFor(`/1 node is in use/.test(document.querySelector('dialog[role=alertdialog][open]')?.textContent || '')`, '删除订阅节点确认');
+		await confirmDialog('Delete 1 node');
 		await apply('删除订阅节点');
 		check(!uget('sightsub_b') && uget('sightsub_a') === 'node', '删除某订阅的节点：使用中的（UDP 节点）保留，其余删除');
 		sh('uci set homeproxy.config.main_udp_node=nil; uci delete homeproxy.sightsub_a; uci commit homeproxy');

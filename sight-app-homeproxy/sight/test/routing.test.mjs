@@ -129,3 +129,11 @@ test('切到自定义的初始配置：国内直连模板建规则集、规则�
 	const shaped = shapeCustom({ routing: { '.name': 'routing', ...p.routing }, dns: { '.name': 'dns', ...p.dns }, ...names });
 	assert.deepEqual(problems(shaped, nodes), []);
 });
+
+test('模板：主节点为自动选择时出站带节点列表；IPv6 关闭时 DNS 只返回 IPv4', async () => {
+	const { planTemplate } = await import('../src/routing.js');
+	const p = planTemplate('blank', { node: 'urltest', urltestNodes: ['a', 'b'], enabled: true, ipv6: false });
+	assert.deepEqual(p.add[0].values, { enabled: '1', label: 'Proxy', node: 'urltest', urltest_nodes: ['a', 'b'] });
+	assert.equal(p.dns.default_strategy, 'ipv4_only');
+	assert.equal(planTemplate('blank', { node: 'n1', enabled: true }).dns.default_strategy, undefined);
+});

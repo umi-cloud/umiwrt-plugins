@@ -4,7 +4,7 @@
 	"description": "Route traffic through your proxy nodes and choose what goes direct.",
 	"icon": "proxy",
 	"group": "applications",
-	"version": "1.5.2",
+	"version": "1.6.0",
 	"package": "sight-app-homeproxy",
 	"changes": {
 		"homeproxy": {

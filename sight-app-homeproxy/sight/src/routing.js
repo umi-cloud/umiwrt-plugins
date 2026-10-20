@@ -11,12 +11,14 @@
  * 关闭代理时把默认出站暂存到 routing.sight_last_outbound（HomeProxy 不读这个键），再打开时恢复。
  */
 import { isIPv4, isIPv6, isCidr, isHostname, toList } from '@sight/sdk/lib';
+import { OFF, URLTEST } from './constants.js';
+import { isPort, planOptions } from './validators.js';
 
-export const OFF = 'nil', DIRECT = 'direct-out', BLOCK = 'block-out';
+export const DIRECT = 'direct-out', BLOCK = 'block-out';
 /* 规则目标：阻断（action reject）；保持原有动作（route-options、resolve 等，页面不管理） */
 export const BLOCK_TARGET = 'block', KEEP_TARGET = 'keep';
 export const BUILTIN_DNS = ['default-dns', 'system-dns'];
-export const DNS_TYPES = ['udp', 'tcp', 'tls', 'https', 'h3', 'quic'];
+const DNS_TYPES = ['udp', 'tcp', 'tls', 'https', 'h3', 'quic'];
 export const STRATEGIES = ['', 'prefer_ipv4', 'prefer_ipv6', 'ipv4_only', 'ipv6_only'];
 export const NETWORKS = ['', 'tcp', 'udp'];
 export const SECTION = { outbound: 'routing_node', rule: 'routing_rule', ruleset: 'ruleset', dns: 'dns_server', dnsRule: 'dns_rule' };
@@ -36,7 +38,7 @@ const DNS_REJECT_KEYS = ['reject_method', 'reject_no_drop'];
 const DNS_PREDEFINED_KEYS = ['predefined_rcode', 'predefined_answer', 'predefined_ns', 'predefined_extra'];
 
 /* 初始模板用的规则集，与 generate_client.uc 的「国内直连」模式同源 */
-export const GEO = {
+const GEO = {
 	geosite_cn: 'https://fastly.jsdelivr.net/gh/1715173329/sing-geosite@rule-set-unstable/geosite-geolocation-cn.srs',
 	geoip_cn: 'https://fastly.jsdelivr.net/gh/1715173329/IPCIDR-CHINA@rule-set/cn.srs',
 };
@@ -48,12 +50,12 @@ const ordered = (cfg, type) => Object.values(cfg).filter(s => s['.type'] === typ
 const base = s => ({ id: s['.name'], label: s.label || s['.name'], enabled: s.enabled === '1', raw: s });
 
 /** 规则的去向：阻断、保持、或出站 id（含 direct-out）；旧配置里 outbound = block-out 也算阻断 */
-export function ruleTarget(s) {
+function ruleTarget(s) {
 	const action = s.action || 'route';
 	if (action === 'reject' || (action === 'route' && s.outbound === BLOCK)) return BLOCK_TARGET;
 	return action === 'route' ? (s.outbound || '') : KEEP_TARGET;
 }
-export function dnsTarget(s) {
+function dnsTarget(s) {
 	const action = s.action || 'route';
 	return action === 'reject' ? BLOCK_TARGET : action === 'route' ? (s.server || '') : KEEP_TARGET;
 }
@@ -80,7 +82,6 @@ export function conditions(raw, dns = false) {
 }
 
 /* --- DNS 地址：页面用一个地址串表示 type/server/server_port/path --- */
-const isPort = v => /^\d{1,5}$/.test(v) && Number(v) >= 1 && Number(v) <= 65535;
 /** 8.8.8.8、tls://1.1.1.1、https://dns.google/dns-query、quic://[2606:4700::1111]:853 → 各字段；无效返回 null */
 export function parseDnsAddress(value, fallback = 'udp') {
 	const v = String(value || '').trim();
@@ -123,22 +124,8 @@ export function settingsForm(c) {
 /** 规则集格式：.json 为源文件，其余（.srs）为二进制 */
 export const guessFormat = url => /\.json(\?.*)?$/i.test(String(url || '').trim()) ? 'source' : 'binary';
 
-/* --- 写入计划：只写表单管理的键；值为空时删除已有选项 --- */
-function planFields(fields, f, raw, values, remove, only) {
-	for (const [k, kind] of Object.entries(fields)) {
-		const exists = has(raw[k]);
-		if (only && !only.includes(k)) { if (exists) remove.add(k); continue; }
-		if (kind === 'list') {
-			const v = f[k].map(x => String(x).trim()).filter(Boolean);
-			if (v.length) values[k] = v; else if (exists) remove.add(k);
-		} else if (kind === 'bool') {
-			if (f[k]) values[k] = '1'; else if (exists && raw[k] !== '0') remove.add(k);
-		} else {
-			const v = String(f[k] ?? '').trim();
-			if (v) values[k] = v; else if (exists) remove.add(k);
-		}
-	}
-}
+/* --- 写入计划：只写表单管理的键（validators.js 的 planOptions）；值为空时删除已有选项 --- */
+const planFields = planOptions;
 const dropKeys = (raw, keys, remove) => keys.forEach(k => { if (has(raw[k])) remove.add(k); });
 const result = (values, remove) => ({ values, remove: [...remove] });
 const head = f => ({ label: f.label.trim(), enabled: f.enabled ? '1' : '0' });
@@ -160,7 +147,7 @@ export function planDnsRule(f, raw = {}) {
 const OUTBOUND_FIELDS = { node: 'string', outbound: 'string', urltest_nodes: 'list', urltest_url: 'string', urltest_interval: 'string', urltest_tolerance: 'string' };
 export function planOutbound(f, raw = {}) {
 	const values = head(f), remove = new Set();
-	const urltest = f.node === 'urltest';
+	const urltest = f.node === URLTEST;
 	planFields(OUTBOUND_FIELDS, { ...f, outbound: f.detour }, raw, values, remove, urltest ? ['node', 'urltest_nodes', 'urltest_url', 'urltest_interval', 'urltest_tolerance'] : ['node', 'outbound']);
 	return result(values, remove);
 }
@@ -193,11 +180,11 @@ export function planSettings(f, c) {
 /* --- 引用关系 --- */
 export const find = (c, kind, id) => c[LIST[kind]].find(x => x.id === id);
 /** 纯函数：某对象引用到的其他对象 [kind, id]（内置的直连、阻断与内置 DNS 不算） */
-export function deps(kind, raw) {
+function deps(kind, raw) {
 	const d = [], out = id => { if (id && id !== DIRECT && id !== BLOCK) d.push(['outbound', id]); }, dns = id => { if (id && !BUILTIN_DNS.includes(id)) d.push(['dns', id]); };
 	if (kind === 'rule') { if (ruleTarget(raw) !== BLOCK_TARGET && (raw.action || 'route') === 'route') out(raw.outbound); toList(raw.rule_set).forEach(r => d.push(['ruleset', r])); }
 	if (kind === 'dnsRule') { if ((raw.action || 'route') === 'route') dns(raw.server); toList(raw.rule_set).forEach(r => d.push(['ruleset', r])); }
-	if (kind === 'outbound') { if (raw.node !== 'urltest') out(raw.outbound); dns(raw.domain_resolver); }
+	if (kind === 'outbound') { if (raw.node !== URLTEST) out(raw.outbound); dns(raw.domain_resolver); }
 	if (kind === 'ruleset' && raw.type !== 'local') out(raw.outbound);
 	if (kind === 'dns') { out(raw.outbound); dns(raw.address_resolver); }
 	return d;
@@ -237,13 +224,13 @@ export function problems(c, nodes = []) {
 		if (!item.enabled) continue;
 		const miss = missingDeps(c, kind, item.raw);
 		if (miss.length) p.push({ msg: '%s refers to %s, which is missing or turned off', args: [item.label, miss.join(', ')] });
-		if (kind === 'outbound' && (item.node === 'urltest' ? item.urltest : [item.node]).some(n => !ids.has(n)))
+		if (kind === 'outbound' && (item.node === URLTEST ? item.urltest : [item.node]).some(n => !ids.has(n)))
 			p.push({ msg: '%s uses a node that no longer exists', args: [item.label] });
 	}
 	if (c.defaultOutbound !== OFF && !outboundOk(c, c.defaultOutbound)) p.push({ msg: 'The default outbound is missing or turned off' });
 	if (!dnsOk(c, c.defaultDns)) p.push({ msg: 'The default DNS server is missing or turned off' });
 	if (!dnsOk(c, c.outboundDns)) p.push({ msg: 'The DNS server for node addresses is missing or turned off' });
-	const used = c.outbounds.filter(o => o.enabled && o.node !== 'urltest').map(o => o.node);
+	const used = c.outbounds.filter(o => o.enabled && o.node !== URLTEST).map(o => o.node);
 	if (new Set(used).size !== used.length) p.push({ msg: 'Two outbounds use the same node' });
 	return p;
 }
@@ -288,7 +275,7 @@ export function validateDnsRule(f, c, raw = {}) {
 export function validateOutbound(f, c, nodes, id = '') {
 	const e = [];
 	if (!f.label.trim()) e.push({ msg: 'Enter a name', field: 'label' });
-	if (f.node === 'urltest') {
+	if (f.node === URLTEST) {
 		if (!f.urltest_nodes.length) e.push({ msg: 'Choose at least one node', field: 'urltest_nodes' });
 		else if (!f.urltest_nodes.every(n => nodes.some(x => x.id === n))) e.push({ msg: 'A selected node no longer exists', field: 'urltest_nodes' });
 		if (f.urltest_url.trim() && !isHttpUrl(f.urltest_url.trim())) e.push({ msg: 'Enter an address starting with http:// or https://', field: 'urltest_url' });
@@ -349,10 +336,11 @@ export function moved(items, index, delta) {
 /**
  * 纯函数：从其他模式切到自定义时的初始配置。只在还没有任何出站时使用；已有自定义配置则原样沿用。
  * template：bypass_china（国内网站与地址直连、其余走代理）、global（除局域网地址外都走代理）、blank（只建出站，默认直连）。
- * ctx：{ node, dnsServer, chinaDnsServer, enabled, names（已有段名）, t（译名） }
+ * ctx：{ node（主节点或 URLTEST）, urltestNodes, dnsServer, chinaDnsServer, enabled, ipv6, names（已有段名）, t（译名） }。
+ * ipv6 为 false 时 DNS 只返回 IPv4：自定义模式下后端不强制，IPv6 流量否则会绕过代理。
  * @returns {{ add: { type: string, name: string, values: object }[], routing: object, dns: object }}
  */
-export function planTemplate(template, { node, dnsServer, chinaDnsServer, enabled, names = [], t = s => s }) {
+export function planTemplate(template, { node, urltestNodes = [], dnsServer, chinaDnsServer, enabled, ipv6 = true, names = [], t = s => s }) {
 	const taken = new Set(names), add = [];
 	const name = b => { let n = b, i = 2; while (taken.has(n)) n = `${b}_${i++}`; taken.add(n); return n; };
 	const section = (type, b, values) => { const n = name(b); add.push({ type, name: n, values: { enabled: '1', ...values } }); return n; };
@@ -366,7 +354,7 @@ export function planTemplate(template, { node, dnsServer, chinaDnsServer, enable
 		if (isHostname(a.server) && !isIPv4(a.server)) v.address_resolver = 'default-dns';
 		return section('dns_server', b, v);
 	};
-	const proxy = section('routing_node', 'sight_proxy', { label: t('Proxy'), node });
+	const proxy = section('routing_node', 'sight_proxy', node === URLTEST ? { label: t('Proxy'), node, urltest_nodes: urltestNodes } : { label: t('Proxy'), node });
 	let defaultDns = 'default-dns';
 	if (template !== 'blank') {
 		/* 与预设模式一致：远程 DNS 默认走 TCP、经代理查询 */
@@ -383,5 +371,7 @@ export function planTemplate(template, { node, dnsServer, chinaDnsServer, enable
 	}
 	const target = template === 'blank' ? DIRECT : proxy;
 	const routing = { default_outbound_dns: 'default-dns', ...(enabled ? { default_outbound: target } : { default_outbound: OFF, sight_last_outbound: target }) };
-	return { add, routing, dns: { default_server: defaultDns } };
+	const dns = { default_server: defaultDns };
+	if (!ipv6) dns.default_strategy = 'ipv4_only';
+	return { add, routing, dns };
 }

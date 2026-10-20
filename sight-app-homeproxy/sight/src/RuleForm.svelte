@@ -1,11 +1,13 @@
 <script>
-	import { tick, untrack } from 'svelte';
+	import { untrack } from 'svelte';
 	import { t, useEditor, Input, Select, Checkbox, Field, FormSection, FormActions, ErrorSummary, Disclosure, DynamicList, Feedback } from '@sight/sdk';
 	import { ruleForm, dnsRuleForm, planRule, planDnsRule, validateRule, validateDnsRule, conditions, BLOCK_TARGET, KEEP_TARGET, DIRECT, BUILTIN_DNS, NETWORKS } from './routing.js';
+import { dnsName, listText } from './labels.js';
+import { showErrors } from './draft.svelte.js';
 
 	/* 分流规则 / DNS 规则表单（放在自定义分流的抽屉里）。raw 为原有节，新建为空；dns 为 true 时编辑 DNS 规则。
 	   常用条件在前，精确域名、网络类型、反选等进「高级」；表单不管理的条件原样保留并提示。 */
-	let { dns = false, raw = null, custom, locked = false, saving = false, labels, onsubmit, oncancel } = $props();
+	let { dns = false, raw = null, custom, locked = false, saving = false, onsubmit, oncancel } = $props();
 	const prefix = untrack(() => dns ? 'hp-dnsrule' : 'hp-rule');
 	const initial = () => {
 		if (raw) return dns ? dnsRuleForm(raw) : ruleForm(raw);
@@ -20,6 +22,8 @@
 	useEditor(() => ({ dirty }));
 	let errors = $state([]), summary = $state(), advancedOpen = $state(false);
 	const fid = k => `${prefix}-${k}`;
+	/* 当前去向是否在选项里；不在时（引用的对象已删）仍列出，避免下拉框把它悄悄换掉 */
+	const knownTarget = v => !v || [KEEP_TARGET, BLOCK_TARGET, DIRECT, ...BUILTIN_DNS].includes(v) || (dns ? custom.dnsServers : custom.outbounds).some(x => x.id === v);
 	const err = k => errors.find(e => e.field === fid(k))?.text || '';
 	/* 表单之外的条件（进程、端口范围、正则等）：保存时原样保留 */
 	const { others, action } = untrack(() => {
@@ -31,9 +35,8 @@
 		event.preventDefault();
 		if (locked) return;
 		const list = dns ? validateDnsRule(form, custom, raw || {}) : validateRule(form, custom, raw || {});
-		errors = list.map(e => ({ text: t(e.msg, ...(e.args || [])), field: fid(e.field) }));
-		if (errors.some(e => document.getElementById(e.field)?.closest('details:not([open])'))) advancedOpen = true;
-		if (errors.length) { await tick(); summary?.focus(); return; }
+		({ errors } = await showErrors(list, fid, { summary, openAdvanced: () => advancedOpen = true }));
+		if (errors.length) return;
 		await onsubmit(dns ? planDnsRule(form, raw || {}) : planRule(form, raw || {}));
 	}
 </script>
@@ -44,7 +47,7 @@
 	</Field>
 {/snippet}
 
-<form class="form" onsubmit={submit} aria-label={dns ? t('DNS rule') : t('Routing rule')} data-hp-rule-form>
+<form class="hp-form" onsubmit={submit} aria-label={dns ? t('DNS rule') : t('Routing rule')} data-hp-rule-form>
 	<ErrorSummary {errors} bind:this={summary} />
 	<Field id={fid('label')} label={t('Name')} error={err('label')}>
 		<Input id={fid('label')} bind:value={form.label} disabled={locked} autocomplete="off" aria-invalid={!!err('label')} />
@@ -56,39 +59,39 @@
 		{#if !dns}{@render many('ip_cidr', t('Destination IP addresses'), '192.0.2.0/24')}{/if}
 		{@render many('source_ip_cidr', t('From devices (IP)'), '192.168.1.10', t('Addresses or ranges of devices on your network.'))}
 		{#if !dns}{@render many('port', t('Destination ports'), '443')}{/if}
-		<fieldset class="sets" id={fid('rule_set')} tabindex="-1">
+		<fieldset class="hp-fieldset" id={fid('rule_set')} tabindex="-1">
 			<legend>{t('Rule sets')}</legend>
 			{#each custom.rulesets as r (r.id)}
 				<Checkbox checked={form.rule_set.includes(r.id)} disabled={locked || (!r.enabled && !form.rule_set.includes(r.id))}
 					onchange={e => form.rule_set = e.currentTarget.checked ? [...form.rule_set, r.id] : form.rule_set.filter(x => x !== r.id)}>
-					{r.label}{#if !r.enabled}<span class="muted"> · {t('Off')}</span>{/if}
+					{r.enabled ? r.label : t('%s (off)', r.label)}
 				</Checkbox>
-			{:else}<p class="muted">{t('No rule sets yet. Add them under Rule sets.')}</p>{/each}
-			{#if err('rule_set')}<small class="error">{err('rule_set')}</small>{/if}
+			{:else}<p class="hp-note">{t('No rule sets yet. Add them under Rule sets.')}</p>{/each}
+			{#if err('rule_set')}<small class="hp-error">{err('rule_set')}</small>{/if}
 		</fieldset>
-		{#if others.length}<Feedback tone="info" message={t('This rule also matches on %s. Those conditions are kept as they are.', others.join(', '))} compact />{/if}
+		{#if others.length}<Feedback tone="info" message={t('This rule also matches on %s. Those conditions are kept as they are.', listText(others))} compact />{/if}
 	</FormSection>
 
 	<Field id={fid('target')} label={dns ? t('Resolve with') : t('Send to')} error={err('target')}>
 		<Select id={fid('target')} bind:value={form.target} disabled={locked} aria-invalid={!!err('target')}>
 			{#if dns}
-				{#each BUILTIN_DNS as d}<option value={d}>{labels.dns(d)}</option>{/each}
-				{#each custom.dnsServers as d (d.id)}<option value={d.id} disabled={!d.enabled}>{d.label}{d.enabled ? '' : ` (${t('Off')})`}</option>{/each}
+				{#each BUILTIN_DNS as d}<option value={d}>{dnsName(custom, d)}</option>{/each}
+				{#each custom.dnsServers as d (d.id)}<option value={d.id} disabled={!d.enabled}>{d.enabled ? d.label : t('%s (off)', d.label)}</option>{/each}
 				<option value={BLOCK_TARGET}>{t('Block (refuse the query)')}</option>
 			{:else}
 				<option value={DIRECT}>{t('Direct')}</option>
-				{#each custom.outbounds as o (o.id)}<option value={o.id} disabled={!o.enabled}>{o.label}{o.enabled ? '' : ` (${t('Off')})`}</option>{/each}
+				{#each custom.outbounds as o (o.id)}<option value={o.id} disabled={!o.enabled}>{o.enabled ? o.label : t('%s (off)', o.label)}</option>{/each}
 				<option value={BLOCK_TARGET}>{t('Block traffic')}</option>
 			{/if}
 			{#if form.target === KEEP_TARGET}<option value={KEEP_TARGET}>{t('Keep the current action (%s)', action)}</option>{/if}
-			{#if form.target && form.target !== KEEP_TARGET && form.target !== BLOCK_TARGET && form.target !== DIRECT && !BUILTIN_DNS.includes(form.target) && !(dns ? custom.dnsServers : custom.outbounds).some(x => x.id === form.target)}
+			{#if !knownTarget(form.target)}
 				<option value={form.target}>{form.target}</option>
 			{/if}
 		</Select>
 	</Field>
 
 	<Disclosure title={t('Advanced')} bind:open={advancedOpen}>
-		<div class="advanced">
+		<div class="hp-advanced">
 			{@render many('domain', t('Exact domains'), 'www.example.com', t('Matches only these names, not their subdomains.'))}
 			{#if !dns}
 				<Field id={fid('network')} label={t('Network')}>
@@ -107,11 +110,3 @@
 		description={t('Rules are checked from top to bottom; the first match wins.')} />
 </form>
 
-<style lang="less">
-	.form { display: flex; flex-direction: column; gap: var(--sp-5); }
-	.advanced { display: flex; flex-direction: column; gap: var(--sp-4); }
-	.sets { display: flex; flex-direction: column; gap: var(--sp-2); margin: 0; padding: 0; border: 0; }
-	.sets legend { margin-bottom: var(--sp-2); padding: 0; font-weight: var(--fw-medium); color: var(--heading-color); font-size: var(--fs-sm); }
-	.muted { margin: 0; color: var(--text-muted); font-size: var(--fs-sm); }
-	.error { color: var(--status-danger-text); font-size: var(--fs-xs); }
-</style>

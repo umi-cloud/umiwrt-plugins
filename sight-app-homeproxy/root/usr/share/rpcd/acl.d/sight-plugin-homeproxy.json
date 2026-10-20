@@ -14,7 +14,8 @@
 					"core_task",
 					"node_latency",
 					"resources_get_version",
-					"singbox_get_features"
+					"singbox_get_features",
+					"subscription_task"
 				]
 			},
 			"file": {
@@ -44,12 +45,8 @@
 					"acllist_write",
 					"core_start",
 					"log_clean",
-					"resources_update"
-				]
-			},
-			"file": {
-				"/etc/homeproxy/scripts/update_subscriptions.uc": [
-					"exec"
+					"resources_update",
+					"subscription_start"
 				]
 			},
 			"uci": [

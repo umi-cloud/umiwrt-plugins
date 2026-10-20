@@ -6,8 +6,10 @@
  */
 import { isIPv4, isIPv6, isHostname, toList } from '@sight/sdk/lib';
 import { SS_METHODS } from './sharelink.js';
+import { isPort, isUint, base64Bytes, planOptions } from './validators.js';
 
 export { SS_METHODS };
+/* 编辑表单管理的协议；其它协议（anytls、wireguard 等，来自分享链接或订阅）只能改名称、地址与端口 */
 export const NODE_TYPES = ['shadowsocks', 'vmess', 'vless', 'trojan', 'hysteria2', 'tuic', 'socks', 'http'];
 /* 需要 sing-box 带 with_quic 编译 */
 export const QUIC_TYPES = ['hysteria2', 'tuic'];
@@ -35,7 +37,7 @@ const STRINGS = ['username', 'password', 'uuid', 'shadowsocks_encrypt_method', '
 	'hysteria_down_mbps', 'hysteria_hop_interval', 'tuic_congestion_control', 'tuic_udp_relay_mode', 'tuic_heartbeat', 'tls_sni', 'tls_utls',
 	'tls_reality_public_key', 'tls_reality_short_id', 'transport', 'ws_host', 'ws_path', 'websocket_early_data', 'websocket_early_data_header',
 	'grpc_servicename', 'http_path', 'httpupgrade_host'];
-export const MANAGED = [...STRINGS, ...BOOLS, ...LISTS];
+const FIELDS = Object.fromEntries([...STRINGS.map(k => [k, 'string']), ...BOOLS.map(k => [k, 'bool']), ...LISTS.map(k => [k, 'list'])]);
 const KEEP = ['label', 'address', 'port', 'grouphash', 'tcp_fast_open', 'tcp_multi_path', 'udp_fragment'];
 
 export const supported = type => NODE_TYPES.includes(type);
@@ -109,23 +111,8 @@ export function planNode(f, section = {}) {
 	const remove = new Set();
 	if (!supported(f.type)) return { values, remove: [] };
 	values.type = f.type;
-	const keys = applicable(f);
-	for (const k of MANAGED) {
-		const has = s[k] != null && s[k] !== '';
-		if (!keys.has(k)) { if (has) remove.add(k); continue; }
-		if (BOOLS.includes(k)) {
-			/* hysteria2 / tuic 必须启用 TLS */
-			const on = k === 'tls' && tlsRequired(f.type) ? true : f[k];
-			if (on) values[k] = '1';
-			else if (has && s[k] !== '0') remove.add(k);
-		} else if (LISTS.includes(k)) {
-			const v = f[k].map(x => String(x).trim()).filter(Boolean);
-			if (v.length) values[k] = v; else if (has) remove.add(k);
-		} else {
-			const v = String(f[k] ?? '').trim();
-			if (v) values[k] = v; else if (has) remove.add(k);
-		}
-	}
+	/* hysteria2 / tuic 必须启用 TLS */
+	planOptions(FIELDS, tlsRequired(f.type) ? { ...f, tls: true } : f, s, values, remove, [...applicable(f)]);
 	/* 换协议：上一种协议的专属选项（含表单不管理的，如多路复用）一并清掉 */
 	if (s.type && s.type !== f.type)
 		for (const k of Object.keys(s)) if (!k.startsWith('.') && !KEEP.includes(k) && !(k in values)) remove.add(k);
@@ -133,16 +120,7 @@ export function planNode(f, section = {}) {
 }
 
 const isHost = v => isIPv4(v) || isIPv6(v) || isHostname(v);
-const isPort = v => /^\d{1,5}$/.test(v) && Number(v) >= 1 && Number(v) <= 65535;
-const isUint = v => /^\d+$/.test(v);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-function base64Bytes(v) {
-	try {
-		if (!/^[A-Za-z0-9+/_-]+={0,2}$/.test(v)) return -1;
-		const s = v.replace(/-/g, '+').replace(/_/g, '/');
-		return atob(s + '='.repeat((4 - s.length % 4) % 4)).length;
-	} catch { return -1; }
-}
 
 /**
  * 纯函数：节点表单校验。features 为 singbox_get_features 的结果。
@@ -163,7 +141,7 @@ export function validateNode(f, features = {}) {
 	const passwordRequired = f.type === 'trojan' || (f.type === 'shadowsocks' && f.shadowsocks_encrypt_method !== 'none');
 	if (keys.has('password') && passwordRequired && !val('password')) err('password', 'Enter the password');
 	const keyBytes = SS_KEY_BYTES[f.shadowsocks_encrypt_method];
-	if (f.type === 'shadowsocks' && keyBytes && val('password') && !val('password').split(':').every(p => base64Bytes(p) === keyBytes))
+	if (f.type === 'shadowsocks' && keyBytes && val('password') && !val('password').split(':').every(p => base64Bytes(p)?.length === keyBytes))
 		err('password', 'This encryption method needs a %d-byte key in Base64', keyBytes);
 	for (const k of ['vmess_alterid', 'hysteria_up_mbps', 'hysteria_down_mbps', 'hysteria_hop_interval', 'tuic_heartbeat', 'websocket_early_data'])
 		if (keys.has(k) && val(k) && !isUint(val(k))) err(k, 'Enter a whole number');

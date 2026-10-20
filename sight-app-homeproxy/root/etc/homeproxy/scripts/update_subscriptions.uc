@@ -569,6 +569,15 @@ function main() {
 		return false;
 	}
 
+	/* Sight：自定义分流的出站引用的节点不删，否则生成的配置会坏、代理起不来 */
+	const custom_used = {};
+	uci.foreach(uciconfig, 'routing_node', (cfg) => {
+		if (cfg.node && cfg.node !== 'urltest')
+			custom_used[cfg.node] = true;
+		for (let n in (type(cfg.urltest_nodes) === 'array' ? cfg.urltest_nodes : (cfg.urltest_nodes ? [cfg.urltest_nodes] : [])))
+			custom_used[n] = true;
+	});
+
 	let added = 0, removed = 0;
 	uci.foreach(uciconfig, ucinode, (cfg) => {
 		/* Nodes created by the user */
@@ -580,6 +589,10 @@ function main() {
 			return null;
 
 		if (!node_cache[cfg.grouphash] || !node_cache[cfg.grouphash][cfg['.name']]) {
+			if (custom_used[cfg['.name']]) {
+				log(sprintf('Keeping node %s: used by custom routing.', cfg.label || cfg['.name']));
+				return null;
+			}
 			uci.delete(uciconfig, cfg['.name']);
 			removed++;
 

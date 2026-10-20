@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseShareLink, decodeBase64 } from '../src/sharelink.js';
+import { parseShareLink } from '../src/sharelink.js';
+import { decodeBase64 } from '../src/validators.js';
 
 const Q = { with_quic: true, with_utls: true };
 const b64 = s => Buffer.from(s).toString('base64');
@@ -22,7 +23,7 @@ test('VLESS Reality：标签、TLS、Reality 参数与 flow', () => {
 test('VLESS WebSocket：路径里的 ?ed= 拆成早期数据选项；缺 type 或 kcp 拒绝', () => {
 	const n = parseShareLink('vless://id@h.example:443?type=ws&security=tls&host=cdn.example&path=%2Fws%3Fed%3D2048#w', Q);
 	assert.deepEqual([n.transport, n.ws_host, n.ws_path, n.websocket_early_data, n.websocket_early_data_header], ['ws', 'cdn.example', '/ws', '2048', 'Sec-WebSocket-Protocol']);
-	assert.equal(parseShareLink('vless://id@h:443?security=tls', Q), null);
+	assert.equal(parseShareLink('vless://id@h:443?security=tls', Q).transport, undefined);
 	assert.equal(parseShareLink('vless://id@h:443?type=kcp', Q), null);
 });
 
@@ -61,4 +62,12 @@ test('Trojan、Hysteria2、TUIC、SOCKS、HTTPS；QUIC 不可用时拒绝基于 
 test('非法与不支持的链接返回 null', () => {
 	for (const l of ['', 'not a link', 'wireguard://x@y:1', 'vless://@h:1?type=tcp', 'socks5://h:99999'])
 		assert.equal(parseShareLink(l, Q), null, l);
+});
+
+test('与订阅脚本的解析对齐：vless 缺 type 按 tcp；ss 的 simple-obfs 改名 obfs-local；vmess 带 global padding 且标签解码', () => {
+	assert.equal(parseShareLink('vless://11111111-2222-3333-4444-555555555555@h.example:443?security=tls#x', Q).transport, undefined);
+	const ss = parseShareLink('ss://YWVzLTI1Ni1nY206cGFzcw@5.6.7.8:8388/?plugin=simple-obfs%3Bobfs%3Dhttp#A', Q);
+	assert.deepEqual([ss.shadowsocks_plugin, ss.shadowsocks_plugin_opts], ['obfs-local', 'obfs=http']);
+	const vm = parseShareLink('vmess://' + Buffer.from(JSON.stringify({ v: '2', ps: 'JP%2001', add: 'v.example', port: 443, id: 'u', net: 'tcp' })).toString('base64'), Q);
+	assert.deepEqual([vm.label, vm.vmess_global_padding], ['JP 01', '1']);
 });

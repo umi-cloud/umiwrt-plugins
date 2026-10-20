@@ -34,25 +34,22 @@ case "$action" in
 		simulate="$(apk upgrade --simulate --network=no sing-box 2>/dev/null)"
 		simulate_rc=$?
 		latest="$(clean "$(printf '%s\n' "$simulate" | sed -n 's/.*Upgrading sing-box (.* -> \([^)]*\)).*/\1/p' | head -n 1)")"
-		if [ "$simulate_rc" -eq 0 ]; then rc=0; else rc=$update_rc; fi
+		# 模拟升级失败就无法判断有没有新版；索引没刷新成功（update_code 非 0）只作提示
+		rc=$simulate_rc
 		extra=",\"current\":\"$current\",\"latest\":\"$latest\",\"update_code\":$update_rc"
 		;;
 	upgrade)
-		# 代理在运行时，装好新版后重启，让新版本生效；重启失败（新版与配置不兼容等）整体记为失败
+		# 代理在运行时，装好新版后重启，让新版本生效；重启失败（新版与配置不兼容等）单独记录：新版已装上，不算更新失败
 		was_running=0
 		client_running && was_running=1
 		apk upgrade -U sing-box
 		rc=$?
 		now="$(installed)"
-		restarted=false
+		restarted=false restart_failed=false
 		if [ "$rc" -eq 0 ] && [ "$now" != "$current" ] && [ "$was_running" = 1 ]; then
-			if /etc/init.d/homeproxy restart; then
-				restarted=true
-			else
-				rc=1
-			fi
+			if /etc/init.d/homeproxy restart; then restarted=true; else restart_failed=true; fi
 		fi
-		extra=",\"from\":\"$current\",\"current\":\"$now\",\"restarted\":$restarted"
+		extra=",\"from\":\"$current\",\"current\":\"$now\",\"restarted\":$restarted,\"restart_failed\":$restart_failed"
 		;;
 	*) rc=1 extra="" ;;
 esac

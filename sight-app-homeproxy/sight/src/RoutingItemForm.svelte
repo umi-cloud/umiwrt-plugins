@@ -1,10 +1,13 @@
 <script>
-	import { tick, untrack } from 'svelte';
+	import { untrack } from 'svelte';
 	import { t, useEditor, Input, Select, Checkbox, Field, FormActions, ErrorSummary, Disclosure, RadioGroup } from '@sight/sdk';
-	import { outboundForm, rulesetForm, dnsForm, planOutbound, planRuleset, planDns, validateOutbound, validateRuleset, validateDns, parseDnsAddress, guessFormat, DIRECT, BUILTIN_DNS } from './routing.js';
+	import { URLTEST } from './constants.js';
+import { outboundForm, rulesetForm, dnsForm, planOutbound, planRuleset, planDns, validateOutbound, validateRuleset, validateDns, parseDnsAddress, guessFormat, DIRECT, BUILTIN_DNS } from './routing.js';
+import { dnsName, kindName } from './labels.js';
+import { showErrors } from './draft.svelte.js';
 
 	/* 出站 / 规则集 / DNS 服务器表单（放在自定义分流的抽屉里）。kind 为 outbound | ruleset | dns，raw 为原有节，新建为空。 */
-	let { kind, raw = null, custom, nodes, locked = false, saving = false, labels, onsubmit, oncancel } = $props();
+	let { kind, raw = null, custom, nodes, locked = false, saving = false, onsubmit, oncancel } = $props();
 	/* 打开抽屉时取一次初值，之后页面数据重载不影响正在编辑的表单；新出站默认选还没有出站使用的节点 */
 	const id = untrack(() => raw?.['.name'] || '');
 	const form = $state(untrack(() => {
@@ -29,9 +32,8 @@
 		event.preventDefault();
 		if (locked) return;
 		const list = kind === 'outbound' ? validateOutbound(form, custom, nodes, id) : kind === 'ruleset' ? validateRuleset(form, custom) : validateDns(form, custom, id);
-		errors = list.map(e => ({ text: t(e.msg, ...(e.args || [])), field: fid(e.field) }));
-		if (errors.some(e => document.getElementById(e.field)?.closest('details:not([open])'))) advancedOpen = true;
-		if (errors.length) { await tick(); summary?.focus(); return; }
+		({ errors } = await showErrors(list, fid, { summary, openAdvanced: () => advancedOpen = true }));
+		if (errors.length) return;
 		const plan = kind === 'outbound' ? planOutbound : kind === 'ruleset' ? planRuleset : planDns;
 		await onsubmit(plan(form, raw || {}));
 	}
@@ -44,11 +46,11 @@
 	</Field>
 {/snippet}
 {#snippet outboundOptions(direct)}
-	<option value={DIRECT}>{direct}</option>
-	{#each outbounds as o (o.id)}<option value={o.id} disabled={!o.enabled}>{o.label}{o.enabled ? '' : ` (${t('Off')})`}</option>{/each}
+	{#if direct}<option value={DIRECT}>{direct}</option>{/if}
+	{#each outbounds as o (o.id)}<option value={o.id} disabled={!o.enabled}>{o.enabled ? o.label : t('%s (off)', o.label)}</option>{/each}
 {/snippet}
 
-<form class="form" onsubmit={submit} aria-label={labels.kind(kind)} data-hp-item-form={kind}>
+<form class="hp-form" onsubmit={submit} aria-label={kindName(kind)} data-hp-item-form={kind}>
 	<ErrorSummary {errors} bind:this={summary} />
 	{@render text('label', t('Name'))}
 
@@ -57,12 +59,12 @@
 			<Select id={fid('node')} bind:value={form.node} disabled={locked} aria-invalid={!!err('node')}>
 				{#if !form.node}<option value="" disabled>{t('Choose a node')}</option>{/if}
 				{#each nodes as n (n.id)}<option value={n.id}>{n.label}</option>{/each}
-				<option value="urltest">{t('Fastest of several nodes (auto)')}</option>
-				{#if form.node && form.node !== 'urltest' && !nodes.some(n => n.id === form.node)}<option value={form.node}>{form.node}</option>{/if}
+				<option value={URLTEST}>{t('Fastest of several nodes (auto)')}</option>
+				{#if form.node && form.node !== URLTEST && !nodes.some(n => n.id === form.node)}<option value={form.node}>{form.node}</option>{/if}
 			</Select>
 		</Field>
-		{#if form.node === 'urltest'}
-			<fieldset class="choices" id={fid('urltest_nodes')} tabindex="-1">
+		{#if form.node === URLTEST}
+			<fieldset class="hp-fieldset" id={fid('urltest_nodes')} tabindex="-1">
 				<legend>{t('Nodes to choose from')}</legend>
 				<div class="scroll">
 					{#each nodes as n (n.id)}
@@ -70,10 +72,10 @@
 							onchange={e => form.urltest_nodes = e.currentTarget.checked ? [...form.urltest_nodes, n.id] : form.urltest_nodes.filter(x => x !== n.id)}>{n.label}</Checkbox>
 					{/each}
 				</div>
-				{#if err('urltest_nodes')}<small class="error">{err('urltest_nodes')}</small>{/if}
+				{#if err('urltest_nodes')}<small class="hp-error">{err('urltest_nodes')}</small>{/if}
 			</fieldset>
 			<Disclosure title={t('Advanced')} bind:open={advancedOpen}>
-				<div class="advanced">
+				<div class="hp-advanced">
 					{@render text('urltest_url', t('Test address'), { placeholder: 'https://www.gstatic.com/generate_204' })}
 					{@render text('urltest_interval', t('Test interval (seconds)'), { inputmode: 'numeric', placeholder: '180' })}
 					{@render text('urltest_tolerance', t('Tolerance (ms)'), { inputmode: 'numeric', placeholder: '50', help: t('Switch only when another node is faster by more than this.') })}
@@ -83,7 +85,7 @@
 			<Field id={fid('detour')} label={t('Connect through')} help={t('Chain proxy: reach this node through another outbound first.')} error={err('detour')}>
 				<Select id={fid('detour')} bind:value={form.detour} disabled={locked} aria-invalid={!!err('detour')} aria-describedby={`${fid('detour')}-help`}>
 					<option value="">{t('Directly')}</option>
-					{#each outbounds as o (o.id)}<option value={o.id} disabled={!o.enabled}>{o.label}{o.enabled ? '' : ` (${t('Off')})`}</option>{/each}
+					{@render outboundOptions('')}
 				</Select>
 			</Field>
 		{/if}
@@ -103,7 +105,7 @@
 		</Field>
 		{#if form.type === 'remote'}
 			<Disclosure title={t('Advanced')} bind:open={advancedOpen}>
-				<div class="advanced">
+				<div class="hp-advanced">
 					<Field id={fid('outbound')} label={t('Download through')} error={err('outbound')}>
 						<Select id={fid('outbound')} bind:value={form.outbound} disabled={locked} aria-invalid={!!err('outbound')}>
 							<option value="">{t('Default outbound')}</option>
@@ -123,11 +125,11 @@
 			</Select>
 		</Field>
 		<Disclosure title={t('Advanced')} bind:open={advancedOpen}>
-			<div class="advanced">
+			<div class="hp-advanced">
 				<Field id={fid('resolver')} label={t('Resolve the server name with')} help={t('Needed when the address is a domain name.')} error={err('resolver')}>
 					<Select id={fid('resolver')} bind:value={form.resolver} disabled={locked} aria-invalid={!!err('resolver')} aria-describedby={`${fid('resolver')}-help`}>
 						<option value="">{t('Default')}</option>
-						{#each BUILTIN_DNS as d}<option value={d}>{labels.dns(d)}</option>{/each}
+						{#each BUILTIN_DNS as d}<option value={d}>{dnsName(custom, d)}</option>{/each}
 						{#each custom.dnsServers.filter(d => d.id !== id) as d (d.id)}<option value={d.id} disabled={!d.enabled}>{d.label}</option>{/each}
 					</Select>
 				</Field>
@@ -141,11 +143,6 @@
 		description={t('Changes take effect when you save. If the device becomes unreachable, they roll back automatically.')} />
 </form>
 
-<style lang="less">
-	.form { display: flex; flex-direction: column; gap: var(--sp-5); }
-	.advanced { display: flex; flex-direction: column; gap: var(--sp-4); }
-	.choices { display: flex; flex-direction: column; gap: var(--sp-2); margin: 0; padding: 0; border: 0; min-width: 0; }
-	.choices legend { margin-bottom: var(--sp-2); padding: 0; font-weight: var(--fw-medium); color: var(--heading-color); font-size: var(--fs-sm); }
+<style>
 	.scroll { display: flex; flex-direction: column; gap: var(--sp-2); max-height: 16rem; overflow: auto; }
-	.error { color: var(--status-danger-text); font-size: var(--fs-xs); }
 </style>

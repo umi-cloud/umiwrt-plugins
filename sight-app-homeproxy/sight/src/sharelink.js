@@ -5,19 +5,10 @@
  * features 为 sight.homeproxy singbox_get_features 的结果，用于判断 QUIC、uTLS 是否可用。
  */
 
+import { decodeBase64 } from './validators.js';
+
 export const SS_METHODS = ['none', 'aes-128-gcm', 'aes-192-gcm', 'aes-256-gcm', 'chacha20-ietf-poly1305', 'xchacha20-ietf-poly1305',
 	'2022-blake3-aes-128-gcm', '2022-blake3-aes-256-gcm', '2022-blake3-chacha20-poly1305'];
-
-/** URL 安全与标准 Base64 均可，补齐填充后按 UTF-8 解码；非法输入返回 null */
-export function decodeBase64(text) {
-	if (!text) return null;
-	try {
-		let s = text.trim().replace(/-/g, '+').replace(/_/g, '/');
-		s += '='.repeat((4 - s.length % 4) % 4);
-		const bin = atob(s);
-		return new TextDecoder('utf-8', { fatal: true }).decode(Uint8Array.from(bin, c => c.charCodeAt(0)));
-	} catch { return null; }
-}
 
 const dec = v => { if (v == null || v === '') return null; try { return decodeURIComponent(v); } catch { return v; } };
 const list = v => v ? v.split(',').map(s => s.trim()).filter(Boolean) : null;
@@ -53,8 +44,8 @@ function transportOptions(type, q, { withHeaderHttp = false } = {}) {
 const parsers = {
 	vless(rest, f) {
 		const u = asUrl(rest); if (!u) return null;
-		const q = u.searchParams, type = q.get('type');
-		if (!u.username || !type || type === 'kcp') return null;
+		const q = u.searchParams, type = q.get('type') || 'tcp';
+		if (!u.username || type === 'kcp') return null;
 		if (type === 'quic' && (!f.with_quic || (q.get('quicSecurity') && q.get('quicSecurity') !== 'none'))) return null;
 		const security = q.get('security');
 		return {
@@ -72,8 +63,8 @@ const parsers = {
 		if (!v || String(v.v) !== '2' || v.net === 'kcp') return null;
 		if (v.net === 'quic' && (!f.with_quic || (v.type && v.type !== 'none'))) return null;
 		const node = {
-			label: v.ps || null, type: 'vmess', address: v.add, port: v.port != null ? String(v.port) : '', uuid: v.id,
-			vmess_alterid: v.aid != null ? String(v.aid) : null, vmess_encrypt: v.scy || 'auto',
+			label: dec(v.ps), type: 'vmess', address: v.add, port: v.port != null ? String(v.port) : '', uuid: v.id,
+			vmess_alterid: v.aid != null ? String(v.aid) : null, vmess_encrypt: v.scy || 'auto', vmess_global_padding: '1',
 			transport: v.net && v.net !== 'tcp' ? v.net : null,
 			tls: v.tls === 'tls' ? '1' : '0', tls_sni: v.sni || v.host || null, tls_alpn: list(v.alpn), tls_utls: f.with_utls ? (v.fp || null) : null,
 		};
@@ -107,9 +98,11 @@ const parsers = {
 		}
 		if (!SS_METHODS.includes(method)) return null;
 		const plugin = u.searchParams.get('plugin')?.split(';');
+		/* 非标准的插件名，与订阅脚本一致 */
+		const pluginName = plugin?.[0] === 'simple-obfs' ? 'obfs-local' : plugin?.[0];
 		return {
 			label: dec(u.hash.slice(1)), type: 'shadowsocks', address: u.hostname, port: u.port || '80', shadowsocks_encrypt_method: method, password,
-			shadowsocks_plugin: plugin?.[0] || null, shadowsocks_plugin_opts: plugin && plugin.length > 1 ? plugin.slice(1).join(';') : null,
+			shadowsocks_plugin: pluginName || null, shadowsocks_plugin_opts: plugin && plugin.length > 1 ? plugin.slice(1).join(';') : null,
 		};
 	},
 	hysteria2(rest, f) {

@@ -84,4 +84,4 @@ git fetch homeproxy-upstream
 git merge -X subtree=sight-app-homeproxy homeproxy-upstream/master
 ```
 
-本仓库删掉了上游的 LuCI 界面（`htdocs/luci-static`、`menu.d`、`po/`）并重写了 `Makefile`，上游改到这些文件时合并会报冲突，保持删除、保留本仓库的 `Makefile` 即可。`root/etc/homeproxy/scripts/homeproxy.uc` 自带 URL 编解码（取代 `luci.http`，`update_subscriptions.uc` 改从 `homeproxy` 导入），上游改到这两处的 import 时保留本仓库的写法。`update_subscriptions.uc` 另外每次运行都把结果写进 `/etc/homeproxy/subscription_status.json`（`write_status`，Sight 页面按订阅展示更新结果），合并时保留这几处调用。合并后更新上表的基线。
+本仓库删掉了上游的 LuCI 界面（`htdocs/luci-static`、`menu.d`、`po/`）并重写了 `Makefile`，上游改到这些文件时合并会报冲突，保持删除、保留本仓库的 `Makefile` 即可。`root/etc/homeproxy/scripts/homeproxy.uc` 自带 URL 编解码（取代 `luci.http`，`update_subscriptions.uc` 改从 `homeproxy` 导入），上游改到这两处的 import 时保留本仓库的写法。`update_subscriptions.uc` 另外每次运行都把结果写进 `/etc/homeproxy/subscription_status.json`（`write_status`，Sight 页面按订阅展示更新结果），合并时保留这几处调用。它还在删除节点前跳过被自定义分流出站引用的节点（`custom_used`），合并时同样保留。Sight 不管理服务端，`sight.homeproxy` 里删掉了上游的 `certificate_write`、`singbox_generator`。合并后更新上表的基线。
