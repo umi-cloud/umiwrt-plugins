@@ -3,8 +3,8 @@
  * 保留 Config / HostConfig / 网络 / 标签等全部原配置，去掉与旧镜像默认值相同的部分（新镜像的默认值随之生效）；
  * 匿名卷按名称接到新容器上，数据不丢。编辑时只替换表单负责的字段，其余原样保留。
  */
-import { splitCommand, createImage, parseDevice, deviceText, ownNetwork, isCustomNetwork, logOf, logConfig, isAnonymousVolume, normalizeCap,
-	memoryBytes, nanoCpus, deviceList, capList } from './service.js';
+import { ownNetwork, isCustomNetwork, isAnonymousVolume } from './resources.js';
+import { splitCommand, createImage, parseDevice, deviceText, logOf, logConfig, normalizeCap, memoryBytes, nanoCpus, deviceList, capList, filled } from './create.js';
 
 const clone = v => v === undefined ? undefined : JSON.parse(JSON.stringify(v));
 const same = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
@@ -142,7 +142,6 @@ export function formFromInspect(c, base) {
 	};
 }
 
-const filled = row => String(row.host ?? '').trim() !== '' || String(row.container ?? '').trim() !== '';
 
 /**
  * 纯函数：重建参数 + 编辑后的表单（已校验）→ 新的 create 参数。

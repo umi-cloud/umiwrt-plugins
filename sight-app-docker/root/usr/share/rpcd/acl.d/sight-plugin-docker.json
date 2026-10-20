@@ -20,8 +20,7 @@
 				],
 				"sight.docker.container": [
 					"inspect",
-					"list",
-					"stats"
+					"list"
 				],
 				"sight.docker.image": [
 					"inspect",

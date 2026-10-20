@@ -1,12 +1,24 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { recreateBody, formFromInspect, buildEdit, joinCommand, parseBind } from '../src/recreate.js';
-import { splitCommand, emptyCreate, validateCreate } from '../src/service.js';
+import { splitCommand, emptyCreate, validateCreate } from '../src/create.js';
+import { parseBind, recreateBody, joinCommand, limitsOf, formFromInspect, buildEdit } from '../src/recreate.js';
+const container = (name, extra = {}) => ({ Id: name.padEnd(64, '0'), Names: ['/' + name], Image: 'busybox', ImageID: 'i', State: 'running', Status: 'Up', Ports: [], Labels: {}, NetworkSettings: { Networks: { bridge: {} } }, Mounts: [], ...extra });
+
+const limitsInspect = () => ({
+	Id: 'a'.repeat(64), Name: '/web', Image: 'sha256:old',
+	Config: { Hostname: 'myhost', Image: 'busybox:stable', Env: [], Cmd: ['sleep', '1'] },
+	HostConfig: { NetworkMode: 'appnet', RestartPolicy: { Name: 'no' }, Memory: 300000000, MemorySwap: 600000000, CpuQuota: 150000, CpuPeriod: 100000,
+		Devices: [{ PathOnHost: '/dev/net/tun', PathInContainer: '/dev/net/tun', CgroupPermissions: 'rwm' }] },
+	Mounts: [],
+	NetworkSettings: { Networks: { appnet: { IPAMConfig: { IPv4Address: '172.30.0.5' }, Aliases: null } } },
+});
 
 const ID = 'abcdef0123456789'.repeat(4);
+
 const VOL = 'f'.repeat(64);
-/* 镜像：ENV PATH、CMD、EXPOSE 80、VOLUME /cache、标签 maintainer */
+
 const image = { Config: { Env: ['PATH=/usr/bin', 'APP_VERSION=1'], Cmd: ['httpd', '-f'], Entrypoint: null, WorkingDir: '/srv', ExposedPorts: { '80/tcp': {} }, Volumes: { '/cache': {} }, Labels: { maintainer: 'x', tier: 'base' } } };
+
 const inspect = () => ({
 	Id: ID, Name: '/web', Image: 'sha256:old',
 	Config: {
@@ -29,6 +41,29 @@ const inspect = () => ({
 		appnet: { IPAMConfig: { IPv4Address: '172.30.0.5' }, Aliases: ['web-alias', ID.slice(0, 12)], Links: null, DriverOpts: null },
 		backend: { IPAMConfig: null, Aliases: null, Links: null, DriverOpts: null },
 	} },
+});
+
+test('编辑：预填主机名、资源限制、设备与固定地址；不改时原写法保留', () => {
+	const c = limitsInspect(), base = recreateBody(c, null);
+	assert.deepEqual(limitsOf(base.body), { hostname: 'myhost', memory: '286', cpus: '1.5', devices: ['/dev/net/tun'], ip: '172.30.0.5', log: '', caps: [] });
+	const body = buildEdit(base, formFromInspect(c, base));
+	const pick = b => [b.Hostname, b.HostConfig.Memory, b.HostConfig.MemorySwap, b.HostConfig.NanoCpus, b.HostConfig.CpuQuota, b.HostConfig.CpuPeriod, b.HostConfig.Devices, b.NetworkingConfig];
+	assert.deepEqual(pick(body), pick(base.body));
+});
+
+test('编辑：改动的资源限制换成新写法，清空即取消；改固定地址与主机名', () => {
+	const c = limitsInspect(), base = recreateBody(c, null);
+	const form = { ...formFromInspect(c, base), memory: '512', cpus: '', devices: ['/dev/dri'], ip: '172.30.0.9', hostname: '' };
+	const body = buildEdit(base, form), host = body.HostConfig;
+	assert.deepEqual([host.Memory, host.MemorySwap, host.NanoCpus, host.CpuQuota, host.CpuPeriod], [536870912, 0, 0, 0, 0]);
+	assert.deepEqual(host.Devices, [{ PathOnHost: '/dev/dri', PathInContainer: '/dev/dri', CgroupPermissions: 'rwm' }]);
+	assert.deepEqual(body.NetworkingConfig.EndpointsConfig.appnet.IPAMConfig, { IPv4Address: '172.30.0.9' });
+	assert.ok(!('Hostname' in body));
+	const cleared = buildEdit(base, { ...formFromInspect(c, base), ip: '' });
+	assert.ok(!cleared.NetworkingConfig.EndpointsConfig.appnet.IPAMConfig);
+	/* 换到另一个自定义网络时地址写在新网络上 */
+	const moved = buildEdit(base, { ...formFromInspect(c, base), network: 'other', ip: '10.9.0.2' });
+	assert.deepEqual(moved.NetworkingConfig.EndpointsConfig, { other: { IPAMConfig: { IPv4Address: '10.9.0.2' } } });
 });
 
 test('重建参数：保留全部原配置，去掉与旧镜像相同的默认值', () => {

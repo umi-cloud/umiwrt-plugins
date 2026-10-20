@@ -1,7 +1,7 @@
 <script>
 	import { onDestroy, untrack } from 'svelte';
-	import { t, errorText, createPoller, Button, Checkbox, Feedback, Input, LogView, Select, Switch } from '@sight/sdk';
-	import { LOG_LINES, parseLogs, sinceOf, appendLogs, filterLogs } from './service.js';
+	import { t, errorText, createPoller, Button, Checkbox, Feedback, Input, LogView, Select, Switch, Toolbar } from '@sight/sdk';
+	import { LOG_LINES, parseLogs, sinceOf, appendLogs, filterLogs } from './logs.js';
 
 	/* 容器日志：最近 N 行，可跟随（每 3 秒按最后一条的时间增量读取）、显示时间、按关键字筛选、下载当前显示的内容 */
 	let { svc, container } = $props();
@@ -56,30 +56,26 @@
 </script>
 
 <div class="logs" data-logs>
-	<div class="tools" role="group" aria-label={t('Log tools')}>
-		<span class="search"><Input type="search" size="compact" placeholder={t('Search log messages')} bind:value={query} aria-label={t('Search log messages')} data-log-search /></span>
+	<Toolbar plain label={t('Log tools')} count={lines?.length ? (query.trim() ? t('%d of %d lines', shown.length, lines.length) : lines.length === 1 ? t('1 line') : t('%d lines', lines.length)) : ''} live={false}>
+		{#snippet search()}<Input type="search" size="compact" placeholder={t('Search log messages')} bind:value={query} aria-label={t('Search log messages')} data-log-search />{/snippet}
 		<Select size="compact" bind:value={limit} aria-label={t('Number of lines')} data-log-lines>
 			{#each LOG_LINES as n}<option value={n}>{t('Last %d lines', n)}</option>{/each}
 		</Select>
 		<Checkbox bind:checked={withTime}>{t('Show time')}</Checkbox>
 		<span class="follow"><Switch checked={follow} aria-label={t('Follow')} onchange={on => follow = on} data-log-follow /><span aria-hidden="true">{t('Follow')}</span></span>
-	</div>
+		{#snippet actions()}
+			<Button size="compact" onclick={load} disabled={lines === undefined}>{t('Refresh logs')}</Button>
+			<Button size="compact" onclick={download} disabled={!shown.length} data-log-download>{t('Download')}</Button>
+		{/snippet}
+	</Toolbar>
 	{#if lines === undefined}<Feedback tone="loading" message={t('Loading…')} compact />
 	{:else if error}<Feedback tone="error" message={t('Logs could not be read: %s', error)} compact />
 	{:else if !lines.length}<Feedback tone="empty" message={t('No log output')} compact />
 	{:else if !shown.length}<Feedback tone="empty" message={t('No lines match the search')} compact />
 	{:else}<LogView {text} label={t('Log contents')} tail maxHeight="50vh" />{/if}
-	<div class="tools">
-		{#if lines?.length}<span class="count">{query.trim() ? t('%d of %d lines', shown.length, lines.length) : lines.length === 1 ? t('1 line') : t('%d lines', lines.length)}</span>{/if}
-		<Button size="compact" onclick={load} disabled={lines === undefined}>{t('Refresh logs')}</Button>
-		<Button size="compact" onclick={download} disabled={!shown.length} data-log-download>{t('Download')}</Button>
-	</div>
 </div>
 
 <style lang="less">
 	.logs { display: flex; flex-direction: column; gap: var(--sp-3); }
-	.tools { display: flex; align-items: center; flex-wrap: wrap; gap: var(--sp-2) var(--sp-3); font-size: var(--fs-sm); }
-	.search { display: grid; flex: 1 1 12rem; min-width: 0; }
 	.follow { display: inline-flex; align-items: center; gap: var(--sp-1); }
-	.count { color: var(--text-muted); font-variant-numeric: tabular-nums; margin-right: auto; }
 </style>

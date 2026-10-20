@@ -1,7 +1,7 @@
 {
 	"id": "docker",
 	"sdk": 1,
-	"version": "1.7.0+5e0a2a64",
+	"version": "1.7.1+dd6212e6",
 	"path": "/docker",
 	"title": "Docker",
 	"description": "Run containers on the router: create them (also from a docker run command), edit and open them, limit their logs, see their CPU and memory use, check for and apply image updates, search Docker Hub and download images, use a terminal, run Compose projects, manage images, networks (including LAN addresses with macvlan), volumes and storage, set a registry mirror, and move the data directory to a disk.",

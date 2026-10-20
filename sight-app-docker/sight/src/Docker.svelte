@@ -1,7 +1,10 @@
 <script>
 	import { onDestroy, tick } from 'svelte';
 	import { t, errorText, client, uci, activity, useEditor, requestLeave, createPoller, route, navigate, fmtBytes, Callout, Card, Tabs, Table, Toolbar, Badge, Button, Checkbox, Icon, StatusHero, Drawer, Dialog, Feedback, Field, Input, ErrorSummary, FormActions } from '@sight/sdk';
-	import { createDocker, isImageRef, normalizeImage, portLinks, groupContainers, cpuPercent, memoryUsage, updateState, checkRefs, lastChecked, statesChanged, matchContainer, troubleOf, rootProblem } from './service.js';
+	import { createDocker } from './service.js';
+	import { portLinks, groupContainers, cpuPercent, memoryUsage, statesChanged, matchContainer, troubleOf } from './containers.js';
+	import { isImageRef, normalizeImage, updateState, checkRefs, lastChecked } from './images.js';
+	import { rootProblem } from './storage.js';
 	import { stateTone, stateLabel, short, date } from './format.js';
 	import ContainerDetail from './ContainerDetail.svelte';
 	import CreateContainer from './CreateContainer.svelte';
@@ -168,9 +171,11 @@
 		const count = Math.max(0, before - (data?.images?.length ?? before));
 		notice = { tone: 'success', text: reclaimed >= 524288 ? t('Removed %d unused images and freed %s', count, fmtBytes(reclaimed)) : t('Removed %d unused images', count) };
 	}
-	async function startService() {
-		busy = 'service'; error = '';
-		try { await svc.startService(); } catch (e) { if (alive) error = errorText(e); }
+	/* 启动/重启 Docker 守护进程：结束后回读 */
+	async function service(action) {
+		if (busy) return;
+		busy = 'service'; notice = null;
+		try { await action(); } catch (e) { if (alive) notice = { tone: 'error', text: errorText(e) }; }
 		finally { if (alive) { busy = ''; await load(); } }
 	}
 	/* 更新：设备端拉取镜像，有新版才重建；抽屉随即关闭（重建后容器 ID 会变），进度显示在状态卡下方 */
@@ -187,12 +192,6 @@
 	}
 	/* 数据目录的问题：放在不支持的文件系统上、被新挂载的盘盖住、或在内存里 */
 	const problem = $derived(data?.reachable ? rootProblem(data.rootStatus) : '');
-	async function restartForDisk() {
-		if (locked) return;
-		busy = 'service'; notice = null;
-		try { await svc.restartService(); } catch (e) { if (alive) notice = { tone: 'error', text: errorText(e) }; }
-		finally { if (alive) { busy = ''; await load(); } }
-	}
 	/* 迁移到新数据目录（设置页保存后调用，Docker 仍在旧目录上）：由镜像 ID 创建的容器无法迁移，结果里说明 */
 	let migrateSkipped = $state([]);
 	async function migrateTo(oldRoot) {
@@ -338,7 +337,7 @@
 {:else if data && !data.reachable}
 	<Card>
 		<StatusHero data-docker="down" icon="container" tone="muted" title={t('Docker is not running')} status={data.error || t('The Docker service cannot be reached.')}>
-			{#snippet actions()}<Button variant="primary" disabled={!!busy} onclick={startService}>{busy === 'service' ? t('Starting…') : t('Start Docker')}</Button>{/snippet}
+			{#snippet actions()}<Button variant="primary" disabled={!!busy} onclick={() => service(() => svc.startService())}>{busy === 'service' ? t('Starting…') : t('Start Docker')}</Button>{/snippet}
 		</StatusHero>
 	</Card>
 {:else if data}
@@ -355,7 +354,7 @@
 			</Callout>
 		{:else if problem === 'shadowed'}
 			<Callout tone="danger" data-root-problem="shadowed" message={t('A disk was mounted over %s while Docker was running, so Docker still uses the old location and containers fail with “blob not found”. Restart Docker to use the disk; images need to be downloaded again.', data.rootStatus.root)}>
-				<Button size="compact" variant="primary" disabled={locked} onclick={restartForDisk}>{busy === 'service' ? t('Restarting…') : t('Restart Docker')}</Button>
+				<Button size="compact" variant="primary" disabled={locked} onclick={() => service(() => svc.restartService())}>{busy === 'service' ? t('Restarting…') : t('Restart Docker')}</Button>
 			</Callout>
 		{:else if problem === 'temporary'}
 			<Callout tone="warning" data-root-problem="temporary" message={t('Docker keeps its data in memory (%s). Images and containers are lost when the router restarts.', data.rootStatus.root)}>
@@ -425,7 +424,7 @@
 		<Drawer error={notice?.tone === 'error' ? notice.text : ''} open={!!detail} title={detail?.name || ''} onclose={closeDetail}>
 			{#if detail}
 				{#key `${detail.id}:${detailVersion}`}
-					<ContainerDetail {svc} container={detail} memTotal={data.info.memory} {locked} updateAvailable={updates[detail.id] === 'available'} onrequest={kind => request(kind, detail)} onstart={() => act(detail, 'start')} onedit={() => openEdit(detail)} />
+					<ContainerDetail {svc} container={detail} memTotal={data.info.memory} usage={usage[detail.id] ?? null} {locked} updateAvailable={updates[detail.id] === 'available'} onrequest={kind => request(kind, detail)} onstart={() => act(detail, 'start')} onedit={() => openEdit(detail)} />
 				{/key}
 			{/if}
 		</Drawer>

@@ -8,7 +8,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=sight-app-docker
-PKG_VERSION:=1.7.0
+PKG_VERSION:=1.7.1
 PKG_RELEASE:=1
 
 # root/usr/share/rpcd/ucode/sight.docker 与 root/usr/share/ucode/sight/docker_socket.uc 为 Apache-2.0
@@ -23,8 +23,8 @@ define Package/sight-app-docker
   SUBMENU:=Web Servers/Proxies
   TITLE:=Docker page for Sight
   PKGARCH:=all
-  # 启动项等系统接口由 sight-ui 0.4.0 起自带的 sight 对象提供
-  EXTRA_DEPENDS:=sight-ui (>=0.5.0)
+  # 启动项由宿主的 sight 对象提供，挂载走 sight.storage，页面用到 OptionList 的说明与 Toolbar 的 plain（sight-ui 0.15.0 起）
+  EXTRA_DEPENDS:=sight-ui (>=0.15.0)
   DEPENDS:=@(aarch64||arm||x86_64) +dockerd +docker +docker-compose +ttyd +rpcd +rpcd-mod-ucode +ucode-mod-fs +ucode-mod-socket +ucode-mod-uci +ucode-mod-ubus +ucode-mod-uloop +sight-ui
   CONFLICTS:=luci-app-dockerman
 endef

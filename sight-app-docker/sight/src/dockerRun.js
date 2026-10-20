@@ -2,7 +2,9 @@
  * 「从 docker run 命令导入」：把应用说明里常见的 docker run 命令拆成新建容器表单。
  * 表单能表达的参数逐项填入；表单不支持的参数不丢弃也不猜，逐条列进 warnings（英文 msgid + args），由页面提示用户。
  */
-import { splitCommand, normalizeImage, LOG_LIMITS, RESTART_POLICIES } from './service.js';
+import { RESTART_POLICIES } from './containers.js';
+import { normalizeImage } from './images.js';
+import { splitCommand, LOG_LIMITS } from './create.js';
 import { joinCommand } from './recreate.js';
 
 /* 不带值的短选项（可合写，如 -dit） */

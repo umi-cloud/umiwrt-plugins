@@ -1,7 +1,7 @@
 <script>
 	import { onDestroy, tick } from 'svelte';
 	import { t, errorText, useEditor, requestLeave, fmtBytes, Badge, Button, Callout, Card, Checkbox, Dialog, Disclosure, Drawer, ErrorSummary, Feedback, Field, FormActions, Input, RadioGroup, Table, Toolbar } from '@sight/sdk';
-	import { validateNetwork } from './service.js';
+	import { validateNetwork } from './resources.js';
 	import { date } from './format.js';
 
 	/* 网络与卷：列出驱动、子网、连接的容器，卷的大小与使用者；新建、删除没有容器使用的，清理全部未使用的卷。

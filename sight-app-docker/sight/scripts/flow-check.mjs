@@ -78,7 +78,7 @@ const waitListen = async port => { for (let i = 0; i < 20 && !listening(port); i
 section('接口签名');
 contract('sight.docker', { version: {}, info: {}, df: {} });
 contract('sight.docker.container', {
-	list: { query: 'Table' }, inspect: { id: 'String', query: 'Table' }, stats: { id: 'String', query: 'Table' },
+	list: { query: 'Table' }, inspect: { id: 'String', query: 'Table' },
 	start: { id: 'String', query: 'Table' }, stop: { id: 'String', query: 'Table' }, restart: { id: 'String', query: 'Table' },
 	create: { query: 'Table', body: 'Table' }, remove: { id: 'String', query: 'Table' }, update: { id: 'String', body: 'Table' },
 });
@@ -481,11 +481,11 @@ try {
 		await fill({ 'pull-image': '' });
 		await setAll('[data-pull-form] [data-search-term]', ['hello-world']);
 		await page.evaluate(`document.querySelector('[data-pull-form] [data-search-term]').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))`);
-		await waitFor(`!!document.querySelector('[data-pull-form] [data-result]') || !!document.querySelector('[data-image-search] .feedback[data-tone=error]')`, 'Docker Hub 搜索', 20000);
-		const found = await page.evaluate(`[...document.querySelectorAll('[data-pull-form] [data-result]')].map(b => ({ name: b.dataset.result, official: /Official/.test(b.textContent) }))`);
+		await waitFor(`!!document.querySelector('[data-pull-form] [data-image-search] [data-value]') || !!document.querySelector('[data-image-search] .feedback[data-tone=error]')`, 'Docker Hub 搜索', 20000);
+		const found = await page.evaluate(`[...document.querySelectorAll('[data-pull-form] [data-image-search] [data-value]')].map(b => ({ name: b.dataset.value, official: /Official/.test(b.textContent) }))`);
 		if (found.length) {
 			check(found[0].name === 'hello-world' && found[0].official && await page.evaluate(`!!document.querySelector('[data-pull-form]')`), '搜索 Docker Hub：回车即搜、不提交表单，官方镜像排在最前', found.slice(0, 3));
-			await page.evaluate(`document.querySelector('[data-pull-form] [data-result="hello-world"]').click()`);
+			await page.evaluate(`document.querySelector('[data-pull-form] [data-image-search] [data-value="hello-world"]').click()`);
 			check(await page.evaluate(`document.getElementById('pull-image').value`) === 'hello-world:latest', '点搜索结果填入镜像名（name:latest），可再改标签');
 		} else {
 			check(true, '容器连不上 Docker Hub：搜索如实说明，可直接填写镜像名', await page.evaluate(`document.querySelector('[data-image-search]').textContent`));

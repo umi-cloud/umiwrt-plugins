@@ -1,7 +1,7 @@
 <script>
 	import { onDestroy, tick } from 'svelte';
 	import { t, errorText, useEditor, requestLeave, Badge, Button, Card, Checkbox, DescriptionList, Dialog, Drawer, ErrorSummary, Feedback, Field, FormActions, Input, Table, Textarea, Toolbar } from '@sight/sdk';
-	import { validateProject } from './service.js';
+	import { validateProject } from './compose.js';
 	import { stateLabel, date } from './format.js';
 	import TaskProgress from './TaskProgress.svelte';
 

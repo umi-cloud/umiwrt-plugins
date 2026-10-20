@@ -1,24 +1,24 @@
 <script>
 	import { onDestroy } from 'svelte';
-	import { t, errorText, createPoller, useEditor, fmtBytes, Badge, Button, Callout, Disclosure, Icon, Select, SettingRow, FormSection, DescriptionList, Feedback } from '@sight/sdk';
-	import { cpuPercent, memoryUsage, canUpdate, portLinks, RESTART_POLICIES } from './service.js';
+	import { t, errorText, useEditor, fmtBytes, Badge, Button, Callout, Disclosure, Icon, Select, SettingRow, FormSection, DescriptionList, Feedback } from '@sight/sdk';
+	import { portLinks, RESTART_POLICIES } from './containers.js';
+	import { isAnonymousVolume } from './resources.js';
+	import { canUpdate } from './images.js';
 	import { stateTone, stateLabel, policyLabel, short, date } from './format.js';
 	import Terminal from './Terminal.svelte';
 	import ContainerLogs from './ContainerLogs.svelte';
 
 	/* 容器详情（抽屉正文）：状态与操作（打开网页、编辑、更新）、资源占用、终端、重启策略、挂载与日志。
 	   启停、删除与更新需确认，交给页面（onrequest）；页面操作后重建本组件以重读全部内容。
-	   Compose 项目里的容器以项目文件为准，不在这里编辑或更新。 */
-	let { svc, container, memTotal = null, locked = false, updateAvailable = false, onrequest, onstart, onedit } = $props();
+	   Compose 项目里的容器以项目文件为准，不在这里编辑或更新。usage 为页面统一采样的 { cpu, memory }，首拍 cpu 为 null */
+	let { svc, container, memTotal = null, locked = false, updateAvailable = false, usage = null, onrequest, onstart, onedit } = $props();
 	const links = $derived(portLinks(container.publish, window.location.hostname));
 	let config = $state(undefined);   // undefined 加载中；null 读取失败
 	let configError = $state('');
 	let policy = $state('');
 	let policyResult = $state(null);
 	let saving = $state(false);
-	let usage = $state(null);         // { cpu, memory }
-	let usageError = $state('');
-	let alive = true, prev = null;
+	let alive = true;
 	onDestroy(() => { alive = false; });
 	useEditor(() => ({ dirty: !!config && policy !== config.restart, busy: saving }));
 
@@ -29,17 +29,6 @@
 		try { const r = await svc.inspect(container.id); if (alive) { config = r; policy = r.restart; } }
 		catch (e) { if (alive) { config = null; configError = errorText(e); } }
 	}
-	/* 资源占用：每 2 秒一次即时采样，CPU 由相邻两次采样相减；首拍只有内存 */
-	async function sample() {
-		try {
-			const s = await svc.stats(container.id);
-			if (!alive) return;
-			usage = { cpu: prev ? cpuPercent(prev, s) : null, memory: memoryUsage(s) };
-			prev = s; usageError = '';
-		} catch (e) { if (alive) usageError = errorText(e); }
-	}
-	const poller = createPoller(sample, 2000);
-	$effect(() => { if (running) { poller.start(); return () => poller.stop(); } });
 	loadConfig();
 
 	async function savePolicy() {
@@ -53,7 +42,7 @@
 	}
 
 	/* 匿名卷名为 64 位十六进制，只显示前 12 位 */
-	const mountSource = m => (/^[a-f0-9]{64}$/.test(m.source || '') ? m.source.slice(0, 12) : m.source) || '-';
+	const mountSource = m => (isAnonymousVolume(m.source) ? m.source.slice(0, 12) : m.source) || '-';
 	/* 内存上限不小于整机内存即视为未限制 */
 	const memoryText = m => !m ? t('Not available') : m.limit && (!memTotal || m.limit < memTotal) ? t('%s of %s', fmtBytes(m.used), fmtBytes(m.limit)) : t('%s (no limit)', fmtBytes(m.used));
 	const usageItems = $derived([
@@ -113,10 +102,7 @@
 
 	{#if running}
 		<FormSection title={t('Resource usage')}>
-			<div data-usage>
-				{#if usageError}<Feedback tone="error" message={t('Usage could not be read: %s', usageError)} compact />
-				{:else}<DescriptionList items={usageItems} columns={2} emphasis />{/if}
-			</div>
+			<div data-usage><DescriptionList items={usageItems} columns={2} emphasis /></div>
 		</FormSection>
 	{/if}
 

@@ -1,14 +1,19 @@
 <script>
 	import { onDestroy } from 'svelte';
 	import { t, errorText, fmtBytes, Button, Card, Dialog, Feedback, Table, Toolbar } from '@sight/sdk';
-	import { logOf, LOG_LIMITS, DEFAULT_LOG } from './service.js';
+	import { logOf, LOG_LIMITS, DEFAULT_LOG } from './create.js';
 
 	/* 存储空间：镜像、容器可写层、卷与容器日志各占多少、能清理多少，并分别处理。
 	   清理已停止的容器按确认框里列出的逐个删除（不删卷），其余用 Docker 的 prune；结束后回读（onreload）。
 	   没有日志上限的容器（不含 Compose 项目里的，那些按项目文件）可一键补上：交给页面的批量重建任务（onlimitlogs） */
 	let { svc, storage, root = '', locked = false, onreload, onlimitlogs } = $props();
 	let logs = $state(null);         // [{ id, name, project, log, size }]；null 读取中或失败
-	$effect(() => { storage; svc.logsUsage().then(r => { if (alive) logs = r; }).catch(() => { if (alive) logs = null; }); });
+	let logsVersion = 0;
+	$effect(() => {
+		storage;
+		const request = ++logsVersion;
+		svc.logsUsage().then(r => { if (alive && request === logsVersion) logs = r; }).catch(() => { if (alive && request === logsVersion) logs = null; });
+	});
 	const unlimited = $derived((logs || []).filter(c => !c.project && logOf(c.log) === ''));
 	const logTotal = $derived(logs?.some(c => c.size != null) ? logs.reduce((n, c) => n + (c.size ?? 0), 0) : null);
 	let busy = $state('');

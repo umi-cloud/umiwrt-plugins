@@ -145,7 +145,6 @@
 	"The data directory must be a full path such as /opt/docker": "数据目录须为完整路径，例如 /opt/docker",
 	"The image is deleted from the device. It can be downloaded again later.": "镜像会从设备上删除，之后可以重新下载。",
 	"Unknown restart policy": "未知的重启策略",
-	"Usage could not be read: %s": "无法读取资源占用：%s",
 	"Volume": "卷",
 	"Where images, containers and volumes are stored. Use a disk with enough space.": "镜像、容器与卷的存放位置，请选择空间足够的磁盘。",
 	"Whether Docker starts the container again after it exits or the device restarts.": "容器退出或设备重启后，Docker 是否自动再启动它。",
@@ -473,5 +472,6 @@
 	"Start the Compose projects": "启动 Compose 项目",
 	"Applying changes to %d containers…": "正在修改 %d 个容器…",
 	"Applied the changes to %d containers.": "已修改 %d 个容器。",
-	"Run containers on the router: create them (also from a docker run command), edit and open them, limit their logs, see their CPU and memory use, check for and apply image updates, search Docker Hub and download images, use a terminal, run Compose projects, manage images, networks (including LAN addresses with macvlan), volumes and storage, set a registry mirror, and move the data directory to a disk.": "在路由器上运行容器：新建（也可从 docker run 命令导入）、编辑和打开容器，限制日志大小，查看 CPU 与内存占用，检查并更新镜像，搜索 Docker Hub 下载镜像，使用终端，运行 Compose 项目，管理镜像、网络（含 macvlan 局域网地址）、卷与存储空间，设置镜像加速，并把数据目录迁到磁盘上。"
+	"Run containers on the router: create them (also from a docker run command), edit and open them, limit their logs, see their CPU and memory use, check for and apply image updates, search Docker Hub and download images, use a terminal, run Compose projects, manage images, networks (including LAN addresses with macvlan), volumes and storage, set a registry mirror, and move the data directory to a disk.": "在路由器上运行容器：新建（也可从 docker run 命令导入）、编辑和打开容器，限制日志大小，查看 CPU 与内存占用，检查并更新镜像，搜索 Docker Hub 下载镜像，使用终端，运行 Compose 项目，管理镜像、网络（含 macvlan 局域网地址）、卷与存储空间，设置镜像加速，并把数据目录迁到磁盘上。",
+	"Space": "空间"
 }

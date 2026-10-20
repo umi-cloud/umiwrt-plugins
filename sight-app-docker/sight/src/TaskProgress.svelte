@@ -1,6 +1,6 @@
 <script>
 	import { t, Badge, Button, Disclosure, Feedback, LogView } from '@sight/sdk';
-	import { pullPercent } from './service.js';
+	import { pullPercent } from './images.js';
 	import { taskTitle, taskResult, stepLabel } from './format.js';
 
 	/* 设备端后台任务的进度：步骤、结果与输出。任务在设备上进行，关掉页面也会做完 */

@@ -1,8 +1,9 @@
 <script>
 	import { onDestroy, tick } from 'svelte';
-	import { t, errorText, useEditor, activity, pending, saveFlow, Button, Callout, Card, Checkbox, Dialog, DynamicList, ErrorSummary, Feedback, FormActions, Input, SettingRow, SettingsGroup } from '@sight/sdk';
+	import { t, errorText, useEditor, activity, pending, saveFlow, Button, Callout, Card, Checkbox, Dialog, DynamicList, ErrorSummary, Feedback, FormActions, Input, SettingRow, SettingsGroup, Table } from '@sight/sdk';
 	import { fmtBytes } from '@sight/sdk/lib';
-	import { validateSettings, pendingRestart, sameDir, diskOf, DEFAULT_DATA_ROOT, MIRROR_PRESETS } from './service.js';
+	import { sameDir, diskOf, DEFAULT_DATA_ROOT } from './storage.js';
+	import { validateSettings, pendingRestart, MIRROR_PRESETS } from './settings.js';
 
 	/* Docker 设置（dockerd 的 uci globals 段）：镜像加速与数据目录。保存即生效：写入会话暂存后带回滚应用，
 	   dockerd 的 reload 重读镜像加速，但不换数据目录、也不清掉全部删除的加速地址；运行值与配置不一致时提示重启。
@@ -60,6 +61,9 @@
 		finally { if (alive) mounting = ''; }
 	}
 
+	/* 分区表：已挂载的在前；未挂载的可挂载后使用 */
+	const diskRows = $derived(disks ? [...disks.usable.map(d => ({ ...d, mounted: true })), ...disks.unmounted.map(d => ({ ...d, mounted: false }))] : []);
+	const diskCells = d => [{ lines: [d.title, d.device] }, { text: d.fstype }, { text: d.mounted ? t('%s free of %s', size(d.free), size(d.size)) : size(d.size) }, { text: d.mounted ? d.mount : t('Not mounted'), mono: d.mounted }];
 	const configuredRoot = $derived(base ? base.dataRoot || DEFAULT_DATA_ROOT : '');
 	const rootChanged = $derived(!!draft && !sameDir(draft.dataRoot.trim() || DEFAULT_DATA_ROOT, root));
 	/* 本次保存会换数据目录（与 Docker 正在用的不同，且是改动过的） */
@@ -122,6 +126,14 @@
 	}
 </script>
 
+{#snippet diskActions(d)}
+	{#if d.mounted}
+		<Button size="compact" disabled={locked || draftDisk?.mount === d.mount} onclick={() => useDisk(d)} data-disk={d.mount}>{draftDisk?.mount === d.mount ? t('Selected') : t('Use')}</Button>
+	{:else}
+		<Button size="compact" disabled={locked || !!mounting} onclick={() => mountAndUse(d)} data-disk-mount={d.device}>{mounting === d.device ? t('Mounting…') : t('Mount and use')}</Button>
+	{/if}
+{/snippet}
+
 <Dialog open={confirmRestart} tone="danger" busy={restarting} title={t('Restart Docker?')} confirmLabel={t('Restart')} cancelLabel={t('Cancel')}
 	onconfirm={restartDocker} onclose={() => { if (!restarting) confirmRestart = false; }}>
 	{restart.includes('data-root') ? t('All containers stop. Containers with a restart policy start again in the new data directory if their images are there.') : t('All containers stop briefly. Containers set to restart automatically start again.')}
@@ -163,21 +175,10 @@
 					<Input id="docker-data-root" name="dockerDataRoot" bind:value={draft.dataRoot} disabled={locked} placeholder={DEFAULT_DATA_ROOT} spellcheck="false" autocomplete="off"
 						aria-describedby="docker-data-root-description" aria-invalid={!!fieldError('docker-data-root')} />
 				</SettingRow>
-				{#if disks && (disks.usable.length || disks.unmounted.length)}
-					<ul class="disks" data-docker-disks>
-						{#each disks.usable as d (d.mount)}
-							<li>
-								<span class="disk"><strong>{d.title}</strong><span class="muted">{d.device} · {d.fstype} · {t('%s free of %s', size(d.free), size(d.size))} · {d.mount}</span></span>
-								<Button size="compact" disabled={locked || draftDisk?.mount === d.mount} onclick={() => useDisk(d)} data-disk={d.mount}>{draftDisk?.mount === d.mount ? t('Selected') : t('Use')}</Button>
-							</li>
-						{/each}
-						{#each disks.unmounted as d (d.device)}
-							<li>
-								<span class="disk"><strong>{d.title}</strong><span class="muted">{d.device} · {d.fstype} · {size(d.size)} · {t('Not mounted')}</span></span>
-								<Button size="compact" disabled={locked || !!mounting} onclick={() => mountAndUse(d)} data-disk-mount={d.device}>{mounting === d.device ? t('Mounting…') : t('Mount and use')}</Button>
-							</li>
-						{/each}
-					</ul>
+				{#if diskRows.length}
+					<div data-docker-disks>
+						<Table headers={[t('Disk'), t('File system'), t('Space'), t('Mount point')]} rows={diskRows} rowKey={d => d.device} cells={diskCells} actions={diskActions} actionsLabel={t('Actions')} />
+					</div>
 					{#if mountError}<Feedback tone="error" message={mountError} compact />{/if}
 					{#if !draftDisk}<Callout tone="warning" message={t('The data directory is not on any disk above. On the router’s internal storage, space is small and containers usually cannot be created at all. Use one of the disks above.')} />{/if}
 				{/if}
@@ -202,8 +203,5 @@
 	.form { display: flex; flex-direction: column; gap: var(--sp-5); }
 	.mirrors { display: flex; flex-direction: column; gap: var(--sp-2); }
 	.presets { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); }
-	.disks { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: var(--sp-2); }
-	.disks li { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); padding: var(--sp-2) var(--sp-3); border: 1px solid var(--border-color); border-radius: var(--radius); }
-	.disk { display: flex; flex-direction: column; min-width: 0; overflow-wrap: anywhere; }
 	.muted { margin: 0; color: var(--text-muted); font-size: var(--fs-xs); }
 </style>
